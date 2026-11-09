@@ -14,6 +14,8 @@ runtime = ["dep:faer"]
 # The candle runner (`src/candle.rs`): networks LightCraft has written in candle, with safetensors weights, on the
 # graphics card (Metal on macOS) or the processor. It shares the installation self-test of `runtime`.
 candle = ["runtime", "dep:candle-core", "dep:lightcraft-denoise-pmrid"]
+# candle networks on NVIDIA cards (CUDA): for the training tool only, never the app (CUDA C kernels; see the PMRID crate)
+cuda = ["candle", "candle-core/cuda", "lightcraft-denoise-pmrid/cuda"]
 # Product-policy switch: absent by default; users may install their own model.
 rawnind-model = ["lightcraft-denoise-core/rawnind-model"]
 

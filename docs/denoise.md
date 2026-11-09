@@ -313,6 +313,9 @@ cargo run --release -p lightcraft-engine --features denoise --example denoise-tr
   PMRID's weights. Every `--every` steps it prints the PSNR on the held-out crops at ISO 1600, 6400 and 25600 and writes an
   installable model folder (`pmrid-yours`). A step of 4 crops of 256 cells takes about 1.1 s on an M4 Max's Metal (the
   processor is four times slower).
+- **On an NVIDIA card** (this branch, `train/cuda`): `--features denoise-cuda` instead of `--features denoise` builds the
+  tool on candle's CUDA backend. It needs NVIDIA's CUDA toolkit (its compiler builds candle's CUDA C kernels), so it is a
+  training tool only: no app, CLI or release build turns it on.
 - **Privacy.** The crops and the weights are made from your photos. They stay in the folders you name: never commit or
   publish them. The tool's code is in the repository; no photo, crop or trained weight is.
 

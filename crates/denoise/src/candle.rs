@@ -68,10 +68,11 @@ fn guarded<T>(what: &str, f: impl FnOnce() -> candle_core::Result<T>) -> Result<
     }
 }
 
-/// Whether this build can run a candle network on a graphics card (Metal on macOS).
-pub const GPU_BUILD: bool = cfg!(target_os = "macos");
+/// Whether this build can run a candle network on a graphics card (Metal on macOS; CUDA with the `cuda` feature, which
+/// only the training tool uses).
+pub const GPU_BUILD: bool = cfg!(any(target_os = "macos", feature = "cuda"));
 
-/// The graphics card candle can use here (Metal on macOS), or why not.
+/// The graphics card candle can use here (Metal on macOS, an NVIDIA card with the `cuda` feature), or why not.
 pub fn gpu_device() -> Result<Device, String> {
     #[cfg(target_os = "macos")]
     {
@@ -81,7 +82,15 @@ pub fn gpu_device() -> Result<Device, String> {
             Err(_) => Err("setting up Metal stopped unexpectedly".into()),
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    {
+        match catch_unwind(|| Device::new_cuda(0)) {
+            Ok(Ok(d)) => Ok(d),
+            Ok(Err(e)) => Err(format!("no CUDA device: {e}")),
+            Err(_) => Err("setting up CUDA stopped unexpectedly".into()),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", feature = "cuda")))]
     {
         Err("this build runs candle networks on the processor only".into())
     }

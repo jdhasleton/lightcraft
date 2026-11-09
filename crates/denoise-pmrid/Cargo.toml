@@ -10,6 +10,11 @@ description = "LightCraft AI denoise (L1): the PMRID raw denoising network in ca
 [lints]
 workspace = true
 
+[features]
+# NVIDIA graphics cards, for the training tool (crates/engine/examples/denoise-train.rs) only: candle's CUDA backend
+# compiles CUDA C kernels with NVIDIA's toolkit, so no app, CLI or release build turns this on.
+cuda = ["candle-core/cuda"]
+
 [dependencies]
 lightcraft-denoise-core = { workspace = true }
 

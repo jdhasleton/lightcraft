@@ -57,6 +57,8 @@ fs4 = { workspace = true }
 sam = ["dep:lightcraft-segment"]
 denoise = ["dep:lightcraft-denoise", "lightcraft-denoise/runtime", "lightcraft-denoise/candle", "lightcraft-gpu/denoise"]
 rawnind-model = ["denoise", "lightcraft-denoise/rawnind-model", "lightcraft-denoise-core/rawnind-model"]
+# The denoise training tool on an NVIDIA card (`--example denoise-train`); needs NVIDIA's CUDA toolkit. Never in the apps.
+denoise-cuda = ["denoise", "lightcraft-denoise/cuda"]
 
 [[example]]
 name = "denoise-train"
