@@ -26,4 +26,4 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod net;
 #[cfg(not(target_arch = "wasm32"))]
-pub use net::{Depthwise, Device, Listing, MULTIPLE, PLANES, Pmrid, Source, Tensor, blur_weights, random_weights};
+pub use net::{Depthwise, Device, GradStore, Listing, MULTIPLE, PLANES, Pmrid, Source, Tensor, Var, blur_weights, random_weights};

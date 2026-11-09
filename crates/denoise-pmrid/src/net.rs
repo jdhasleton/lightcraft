@@ -1,6 +1,7 @@
 //! The network itself (see the crate's notes). Modified work under the Apache License 2.0: see the crate root and NOTICE.
 
-pub use candle_core::{Device, Tensor};
+pub use candle_core::backprop::GradStore;
+pub use candle_core::{Device, Tensor, Var};
 
 use lightcraft_denoise_core::run::Error;
 use lightcraft_denoise_core::safetensors::Weights;
@@ -57,11 +58,6 @@ fn load(e: candle_core::Error) -> Error {
     Error::Load(e.to_string())
 }
 
-/// `v[i]`, or an error (never reached: every source checks its values against the shape).
-fn at(v: &[f32], i: usize) -> Result<f32, Error> {
-    v.get(i).copied().ok_or_else(|| Error::Load("a parameter is shorter than its shape".into()))
-}
-
 /// How the depthwise convolutions are computed (the same numbers either way, to rounding).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Depthwise {
@@ -83,51 +79,57 @@ struct Build<'a> {
     src: &'a mut dyn Source,
     dev: &'a Device,
     depthwise: Depthwise,
+    /// When the network is built to be trained: every parameter as a variable, by name.
+    vars: Option<Vec<(String, Var)>>,
 }
 
 impl Build<'_> {
-    fn upload(&self, values: Vec<f32>, shape: &[usize]) -> Result<Tensor, Error> {
-        Tensor::from_vec(values, shape, self.dev).map_err(load)
+    /// Parameter `name` of `shape` on the device (a variable when training). Every form a layer keeps is derived from it
+    /// by tensor operations, so gradients reach it.
+    fn param(&mut self, name: &str, shape: &[usize]) -> Result<Tensor, Error> {
+        let values = self.src.get(name, shape)?;
+        match &mut self.vars {
+            Some(vars) => {
+                let v = Var::from_vec(values, shape, self.dev).map_err(load)?;
+                let t = v.as_tensor().clone();
+                vars.push((name.to_string(), v));
+                Ok(t)
+            }
+            None => Tensor::from_vec(values, shape, self.dev).map_err(load),
+        }
     }
 
     fn separable(&mut self, p: &str, cin: usize, cout: usize, k: usize) -> Result<Separable, Error> {
-        let dw = self.src.get(&format!("{p}.depthwise.weight"), &[cin, 1, k, k])?;
-        let pw = self.src.get(&format!("{p}.pointwise.weight"), &[cout, cin, 1, 1])?;
-        let pb = self.src.get(&format!("{p}.pointwise.bias"), &[cout])?;
-        let depthwise = match self.depthwise {
-            Depthwise::Shifted => {
-                let mut taps = Vec::with_capacity(k * k);
-                for tap in 0..k * k {
-                    let per_channel = (0..cin).map(|c| at(&dw, c * k * k + tap)).collect::<Result<Vec<f32>, Error>>()?;
-                    taps.push(self.upload(per_channel, &[1, cin, 1, 1])?);
+        let dw = self.param(&format!("{p}.depthwise.weight"), &[cin, 1, k, k])?;
+        let pw = self.param(&format!("{p}.pointwise.weight"), &[cout, cin, 1, 1])?;
+        let pb = self.param(&format!("{p}.pointwise.bias"), &[cout])?;
+        let shaped = || -> R<(Kernel, Tensor, Tensor)> {
+            let per_tap = dw.reshape((cin, k * k))?;
+            let depthwise = match self.depthwise {
+                Depthwise::Shifted => {
+                    Kernel::Shifted((0..k * k).map(|tap| per_tap.narrow(1, tap, 1)?.reshape((1, cin, 1, 1))).collect::<R<Vec<_>>>()?)
                 }
-                Kernel::Shifted(taps)
-            }
-            Depthwise::Unfold => Kernel::Unfold(self.upload(dw, &[cin, 1, k * k])?),
+                Depthwise::Unfold => Kernel::Unfold(dw.reshape((cin, 1, k * k))?),
+            };
+            Ok((depthwise, pw.reshape((cout, cin))?, pb.reshape((1, cout, 1, 1))?))
         };
-        Ok(Separable { k, depthwise, pw: self.upload(pw, &[cout, cin])?, pb: self.upload(pb, &[1, cout, 1, 1])?, cout })
+        let (depthwise, pw, pb) = shaped().map_err(load)?;
+        Ok(Separable { k, depthwise, pw, pb, cout })
     }
 
     fn conv(&mut self, p: &str, cin: usize, cout: usize, k: usize) -> Result<Conv, Error> {
-        let w = self.src.get(&format!("{p}.conv.weight"), &[cout, cin, k, k])?;
-        let b = self.src.get(&format!("{p}.conv.bias"), &[cout])?;
-        Ok(Conv { w: self.upload(w, &[cout, cin, k, k])?, b: self.upload(b, &[1, cout, 1, 1])?, k })
+        let w = self.param(&format!("{p}.conv.weight"), &[cout, cin, k, k])?;
+        let b = self.param(&format!("{p}.conv.bias"), &[cout])?.reshape((1, cout, 1, 1)).map_err(load)?;
+        Ok(Conv { w, b, k })
     }
 
     /// A 2 × 2 transposed convolution of stride 2, kept as one matrix: row `(co · 2 + dy) · 2 + dx` is what input
     /// channel `ci` adds to output pixel `(2y + dy, 2x + dx)` of channel `co`.
     fn up(&mut self, p: &str, cin: usize, cout: usize) -> Result<Up, Error> {
-        let w = self.src.get(&format!("{p}.weight"), &[cin, cout, 2, 2])?;
-        let b = self.src.get(&format!("{p}.bias"), &[cout])?;
-        let mut wt = Vec::with_capacity(cout * 4 * cin);
-        for co in 0..cout {
-            for d in 0..4 {
-                for ci in 0..cin {
-                    wt.push(at(&w, (ci * cout + co) * 4 + d)?);
-                }
-            }
-        }
-        Ok(Up { wt: self.upload(wt, &[cout * 4, cin])?, b: self.upload(b, &[1, cout, 1, 1])?, cout })
+        let w = self.param(&format!("{p}.weight"), &[cin, cout, 2, 2])?;
+        let b = self.param(&format!("{p}.bias"), &[cout])?.reshape((1, cout, 1, 1)).map_err(load)?;
+        let wt = w.permute((1, 2, 3, 0)).and_then(|t| t.reshape((cout * 4, cin))).map_err(load)?;
+        Ok(Up { wt, b, cout })
     }
 
     fn encoder_stage(&mut self, p: &str, cin: usize, cout: usize, blocks: usize) -> Result<Vec<EncoderBlock>, Error> {
@@ -169,23 +171,36 @@ enum Kernel {
 /// samples starting at `i · w' + j`: the runs are copied side by side (`[C, k², h · w']`), one batched product with each
 /// channel's weights sums them, and the padding columns are dropped. A stride of 2 takes every other place after.
 fn unfolded(x: &Tensor, w: &Tensor, k: usize, stride: usize) -> R<Tensor> {
-    let (_, c, h, wd) = x.dims4()?;
+    let (n, c, h, wd) = x.dims4()?;
     let p = k / 2;
     let wp = wd + 2 * p;
-    let flat = x.pad_with_zeros(2, p, p + 1)?.pad_with_zeros(3, p, p)?.reshape((c, (h + 2 * p + 1) * wp))?;
-    // `cat` of views along a middle dimension gives a transposed layout, which candle's Metal product refuses: there each
-    // run is copied out first, so that `cat` lays them side by side plainly (the processor's product takes either)
-    let gpu = !x.device().is_cpu();
+    let flat = x.pad_with_zeros(2, p, p + 1)?.pad_with_zeros(3, p, p)?.reshape((n, c, (h + 2 * p + 1) * wp))?;
+    // `cat` of views along a middle dimension gives a transposed layout, which candle's Metal product refuses, and the
+    // processor's too for a batch: there each run is copied out first, so that `cat` lays them side by side plainly (the
+    // processor's product takes one tile's as it is)
+    let copy = !x.device().is_cpu() || n > 1;
     let mut runs = Vec::with_capacity(k * k);
     for i in 0..k {
         for j in 0..k {
-            let run = flat.narrow(1, i * wp + j, h * wp)?;
-            runs.push(if gpu { run.contiguous()? } else { run }.unsqueeze(1)?);
+            let run = flat.narrow(2, i * wp + j, h * wp)?;
+            runs.push(if copy { run.contiguous()? } else { run }.unsqueeze(2)?);
         }
     }
-    let cols = Tensor::cat(&runs, 1)?;
-    let y = w.matmul(&cols)?.reshape((1, c, h, wp))?.narrow(3, 0, wd)?.contiguous()?;
+    let cols = Tensor::cat(&runs, 2)?;
+    // one product per picture of the batch: the weights laid out for each (small), as the Metal product wants
+    let w = if n == 1 { w.unsqueeze(0)? } else { w.unsqueeze(0)?.broadcast_as((n, c, 1, k * k))?.contiguous()? };
+    let y = w.matmul(&cols)?.reshape((n, c, h, wp))?.narrow(3, 0, wd)?.contiguous()?;
     if stride == 2 { every_other(&y) } else { Ok(y) }
+}
+
+/// `w` (`[rows, cols]`) times each picture of `x` (`[n, cols, l]`): `[n, rows, l]`.
+fn batched(w: &Tensor, x: &Tensor) -> R<Tensor> {
+    let (n, _, _) = x.dims3()?;
+    if n == 1 {
+        return w.matmul(&x.squeeze(0)?)?.unsqueeze(0);
+    }
+    let (rows, cols) = w.dims2()?;
+    w.unsqueeze(0)?.broadcast_as((n, rows, cols))?.contiguous()?.matmul(x)
 }
 
 /// One tap of a depthwise kernel per channel, multiplied into the shifted picture and summed.
@@ -214,10 +229,7 @@ fn every_other(x: &Tensor) -> R<Tensor> {
 /// A 1 × 1 convolution: `w` is `[cout, cin]`.
 fn pointwise(x: &Tensor, w: &Tensor, b: &Tensor, cout: usize) -> R<Tensor> {
     let (n, cin, h, wd) = x.dims4()?;
-    if n != 1 {
-        candle_core::bail!("one tile at a time")
-    }
-    w.matmul(&x.reshape((cin, h * wd))?)?.reshape((1, cout, h, wd))?.broadcast_add(b)
+    batched(w, &x.reshape((n, cin, h * wd))?)?.reshape((n, cout, h, wd))?.broadcast_add(b)
 }
 
 struct Separable {
@@ -263,9 +275,9 @@ struct Up {
 
 impl Up {
     fn forward(&self, x: &Tensor) -> R<Tensor> {
-        let (_, cin, h, w) = x.dims4()?;
-        let m = self.wt.matmul(&x.reshape((cin, h * w))?)?;
-        m.reshape((self.cout, 2, 2, h, w))?.permute((0, 3, 1, 4, 2))?.reshape((1, self.cout, 2 * h, 2 * w))?.broadcast_add(&self.b)
+        let (n, cin, h, w) = x.dims4()?;
+        let m = batched(&self.wt, &x.reshape((n, cin, h * w))?)?;
+        m.reshape((n, self.cout, 2, 2, h, w))?.permute((0, 1, 4, 2, 5, 3))?.reshape((n, self.cout, 2 * h, 2 * w))?.broadcast_add(&self.b)
     }
 }
 
@@ -328,7 +340,28 @@ impl Pmrid {
 
     /// [`Pmrid::new`] with the depthwise convolutions computed as `depthwise` says.
     pub fn with(src: &mut dyn Source, dev: &Device, depthwise: Depthwise) -> Result<Self, Error> {
-        let mut b = Build { src, dev, depthwise };
+        Self::build(&mut Build { src, dev, depthwise, vars: None })
+    }
+
+    /// The network built to be trained: every parameter is a variable (named as in [`Pmrid::parameters`]) that the
+    /// forward pass's gradients reach.
+    pub fn trainable(src: &mut dyn Source, dev: &Device) -> Result<(Self, Vec<(String, Var)>), Error> {
+        let mut b = Build { src, dev, depthwise: Depthwise::Unfold, vars: Some(Vec::new()) };
+        let net = Self::build(&mut b)?;
+        Ok((net, b.vars.unwrap_or_default()))
+    }
+
+    /// The variables of a trained network as weights (to save as safetensors).
+    pub fn weights_of(vars: &[(String, Var)]) -> Result<Weights, Error> {
+        let mut w = Weights::default();
+        for (name, v) in vars {
+            let values = v.as_tensor().flatten_all().and_then(|t| t.to_vec1::<f32>()).map_err(load)?;
+            w.insert(name, v.as_tensor().dims(), values)?;
+        }
+        Ok(w)
+    }
+
+    fn build(b: &mut Build<'_>) -> Result<Self, Error> {
         Ok(Pmrid {
             conv0: b.conv("conv0", PLANES, 16, 3)?,
             enc: [
@@ -356,11 +389,11 @@ impl Pmrid {
         Ok(list.names)
     }
 
-    /// Run one tile: `[1, 4, t, t]` in, the same out, `t` a multiple of [`MULTIPLE`].
+    /// Run tiles: `[n, 4, h, w]` in, the same out, `h` and `w` multiples of [`MULTIPLE`].
     pub fn forward(&self, inp: &Tensor) -> R<Tensor> {
         let (n, c, h, w) = inp.dims4()?;
-        if n != 1 || c != PLANES || h % MULTIPLE != 0 || w % MULTIPLE != 0 || h == 0 || w == 0 {
-            candle_core::bail!("PMRID takes [1, 4, t, t] with t a multiple of {MULTIPLE}, not {:?}", inp.dims())
+        if n == 0 || c != PLANES || h % MULTIPLE != 0 || w % MULTIPLE != 0 || h == 0 || w == 0 {
+            candle_core::bail!("PMRID takes [n, 4, h, w] with h and w multiples of {MULTIPLE}, not {:?}", inp.dims())
         }
         let stage = |blocks: &[EncoderBlock], x: Tensor| blocks.iter().try_fold(x, |x, b| b.forward(&x));
         let c0 = self.conv0.forward(inp, true)?;

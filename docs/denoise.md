@@ -287,6 +287,35 @@ reads 0.018 at mid-grey), so the `LC_REAL` levels below ISO 25600 cannot be meas
 the real test is [Real pairs](#real-pairs), which have not been run yet. PMRID was trained for one phone's sensor, and no
 comparison with Lightroom is claimed.
 
+### Training on your photos
+
+PMRID's weights were trained for a phone. `crates/engine/examples/denoise-train.rs` fine-tunes them on your own raw photos,
+on your computer (Metal, else the processor), the way its authors trained it: clean pictures with noise added.
+
+```text
+cargo run --release -p lightcraft-engine --features denoise --example denoise-train -- \
+    prepare --from <folder of raws> --out <data folder> --max-iso 400
+cargo run --release -p lightcraft-engine --features denoise --example denoise-train -- \
+    train --data <data folder> --init pmrid-model --out <model folder> --steps 4000 --batch 4
+```
+
+- **The data.** `prepare` reads the raw files (it never writes to them) and keeps Bayer raws shot at `--max-iso` or below.
+  Each 2 × 2 cells of one colour are averaged into one (half the size, half the noise, so the ground truth is cleaner),
+  and random well-exposed crops of the four packed planes are stored (mean 3 % to 60 % of white, almost nothing clipped).
+  About one photo in twenty is held out, all its crops, for validation. Only the camera's own raw data is used: files a
+  raw developer made (Lightroom's Denoise and Enhance DNGs among them) are linear, not Bayer, and are left out, and nothing
+  another program rendered is ever a target.
+- **The noise.** Each training crop is brightened or darkened by up to two times, then given Poisson-Gaussian noise of a
+  Canon EOS R body at an ISO drawn evenly in logarithms from 400 to 51200 (the levels of
+  [Fitted on real cameras](#fitted-on-real-cameras), interpolated). It is mapped by the k-sigma transform from a noise
+  estimate off by up to a quarter either way, as the app's estimate can be. The target is the clean crop mapped alike.
+- **The training.** L1 loss, Adam (learning rate 1e-4, warmed up over 100 steps, then a cosine down to a tenth), from
+  PMRID's weights. Every `--every` steps it prints the PSNR on the held-out crops at ISO 1600, 6400 and 25600 and writes an
+  installable model folder (`pmrid-yours`). A step of 4 crops of 256 cells takes about 1.1 s on an M4 Max's Metal (the
+  processor is four times slower).
+- **Privacy.** The crops and the weights are made from your photos. They stay in the folders you name: never commit or
+  publish them. The tool's code is in the repository; no photo, crop or trained weight is.
+
 ## Photos, previews and exports
 
 Original RAW files stay untouched. A cleaned picture is cached under

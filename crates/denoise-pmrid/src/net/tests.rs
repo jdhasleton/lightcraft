@@ -174,8 +174,52 @@ fn the_parameters_are_the_published_ones() {
 #[test]
 fn a_tile_the_network_cannot_take_is_an_error() {
     let net = Pmrid::new(&mut random_weights(1, 0.1).unwrap(), &Device::Cpu).unwrap();
-    for dims in [(1, 4, 24, 24), (1, 3, 32, 32), (2, 4, 32, 32)] {
+    for dims in [(1, 4, 24, 24), (1, 3, 32, 32), (0, 4, 32, 32)] {
         let x = Tensor::zeros(dims, candle_core::DType::F32, &Device::Cpu).unwrap();
         assert!(net.forward(&x).is_err(), "{dims:?}");
     }
+}
+
+#[test]
+fn a_batch_gives_what_its_tiles_give_one_at_a_time() {
+    let net = Pmrid::new(&mut random_weights(4, 0.1).unwrap(), &Device::Cpu).unwrap();
+    let (a, b) = (tile(32), tile(32).iter().map(|v| 1.0 - v).collect::<Vec<f32>>());
+    let one = |x: &[f32]| {
+        net.forward(&Tensor::from_vec(x.to_vec(), (1, 4, 32, 32), &Device::Cpu).unwrap()).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap()
+    };
+    let both = net.forward(&Tensor::from_vec([a.clone(), b.clone()].concat(), (2, 4, 32, 32), &Device::Cpu).unwrap()).unwrap();
+    let both = both.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let want = [one(&a), one(&b)].concat();
+    let worst = both.iter().zip(&want).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+    assert!(worst < 1e-4, "{worst}");
+}
+
+#[test]
+fn a_trainable_network_learns_and_saves_its_weights() {
+    let (net, vars) = Pmrid::trainable(&mut random_weights(5, 0.05).unwrap(), &Device::Cpu).unwrap();
+    assert_eq!(vars.len(), 141);
+    let x = Tensor::from_vec([tile(32), tile(32)].concat(), (2, 4, 32, 32), &Device::Cpu).unwrap();
+    // the target: the input, so the network must learn to predict no noise
+    let loss = |net: &Pmrid| (net.forward(&x).unwrap() - &x).unwrap().sqr().unwrap().mean_all().unwrap();
+    let before = loss(&net);
+    let grads = before.backward().unwrap();
+    let mut reached = 0;
+    for (_, v) in &vars {
+        if let Some(g) = grads.get(v) {
+            let g = g.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            assert!(g.iter().all(|v| v.is_finite()));
+            reached += 1;
+            v.set(&(v.as_tensor() - (grads.get(v).unwrap() * 0.05).unwrap()).unwrap()).unwrap();
+        }
+    }
+    assert_eq!(reached, vars.len(), "every parameter gets a gradient");
+    let after = loss(&net);
+    let (b, a) = (before.to_scalar::<f32>().unwrap(), after.to_scalar::<f32>().unwrap());
+    assert!(a < b, "one step down the gradient lowers the loss: {b} -> {a}");
+    // the trained values come back as weights the runner loads
+    let w = Pmrid::weights_of(&vars).unwrap();
+    let mut again = lightcraft_denoise_core::safetensors::Weights::parse(&w.to_bytes()).unwrap();
+    let reloaded = Pmrid::new(&mut again, &Device::Cpu).unwrap();
+    let diff = (reloaded.forward(&x).unwrap() - net.forward(&x).unwrap()).unwrap().abs().unwrap().max_all().unwrap().to_scalar::<f32>().unwrap();
+    assert!(diff < 1e-5, "{diff}");
 }
