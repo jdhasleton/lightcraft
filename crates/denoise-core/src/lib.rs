@@ -13,7 +13,8 @@ pub mod manifest;
 pub mod nlm;
 pub mod product;
 pub mod run;
+pub mod safetensors;
 pub mod tiles;
 
-pub use manifest::{DenoiserManifest, Domain, Gain, ManifestError};
+pub use manifest::{Architecture, DenoiserManifest, Domain, Gain, ManifestError, Network, NoiseMap};
 pub use run::{Control, Error, Params, TileRunner, denoise_bayer};

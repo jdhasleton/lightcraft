@@ -1,0 +1,22 @@
+[package]
+name = "lightcraft-denoise-pmrid"
+version.workspace = true
+edition.workspace = true
+# Its network follows the PMRID authors' PyTorch definition (Apache-2.0, see NOTICE), as crates/segment does SAM 3's:
+# Apache-2.0 only, not the MIT option.
+license = "Apache-2.0"
+description = "LightCraft AI denoise (L1): the PMRID raw denoising network in candle, for weights the user converts and installs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lightcraft-denoise-core = { workspace = true }
+
+# the network runs natively only (the web build has no AI denoise models); candle's random numbers need a JS shim on wasm
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Pure Rust (default features off: no MKL, Accelerate or CUDA); the version SAM 3 uses (see the workspace manifest).
+candle-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { workspace = true, features = ["metal"] }

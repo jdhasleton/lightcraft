@@ -59,7 +59,7 @@ pub struct Services {
     pub picker: Option<pick::Picker>,
     /// Show an open dialog for photos; returns paths.
     pub pick_files: Option<PickFiles>,
-    /// Local ONNX model; a manifest must accompany it.
+    /// Local denoise model file (`.onnx`, or a candle network's `.safetensors`); a manifest must accompany it.
     pub pick_denoise_model: Option<PickFiles>,
     /// Open dialog for a face model (`.onnx`; Settings ▸ Faces ▸ Add a model file…).
     pub pick_model_file: Option<PickFiles>,

@@ -104,7 +104,7 @@ pub(crate) fn services(cc: &eframe::CreationContext<'_>, log_file: Option<&std::
         })),
         pick_denoise_model: Some(Box::new(|| {
             file_dialog()
-                .add_filter_nocase(lightcraft_ui_egui::i18n::tr("ONNX model"), &["onnx"])
+                .add_filter_nocase(lightcraft_ui_egui::i18n::tr("Denoise model"), &["onnx", "safetensors"])
                 .pick_file()
                 .map(|p| vec![p.to_string_lossy().into_owned()])
                 .unwrap_or_default()

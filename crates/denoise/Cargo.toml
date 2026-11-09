@@ -11,6 +11,9 @@ workspace = true
 [features]
 default = []
 runtime = ["dep:faer"]
+# The candle runner (`src/candle.rs`): networks LightCraft has written in candle, with safetensors weights, on the
+# graphics card (Metal on macOS) or the processor. It shares the installation self-test of `runtime`.
+candle = ["runtime", "dep:candle-core", "dep:lightcraft-denoise-pmrid"]
 # Product-policy switch: absent by default; users may install their own model.
 rawnind-model = ["lightcraft-denoise-core/rawnind-model"]
 
@@ -28,5 +31,21 @@ miniz_oxide = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
 
+# the candle runner is native only (the web build has no AI denoise models)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Pure Rust (default features off: no MKL, Accelerate or CUDA); the version SAM 3 uses (see the workspace manifest).
+candle-core = { workspace = true, optional = true }
+# PMRID's network: Apache-2.0 only (its definition follows the authors' PyTorch code; see NOTICE)
+lightcraft-denoise-pmrid = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { workspace = true, optional = true, features = ["metal"] }
+
+[[example]]
+name = "pmrid-convert"
+required-features = ["candle"]
+
 [dev-dependencies]
 proptest = { workspace = true }
+# tests record why they skip (`cargo xtask ci` lists the skips)
+lightcraft-testkit = { workspace = true }

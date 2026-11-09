@@ -194,6 +194,8 @@ pub(crate) fn make_product(spec: &JobSpec, progress: Option<&Progress>) -> Resul
     }
     let decoded = began.elapsed();
     let model = loaded(spec)?;
+    // a model that keeps something of the photo gets one of its own, so photos made at once never share it
+    let model = model.for_photo().unwrap_or(model);
     // Packed input, returned RGB and the preceding group's RGB overlap while tiles run.
     let scratch =
         model.bytes_per_tile().saturating_add(128usize.saturating_mul(spec.manifest.tile as usize).saturating_mul(spec.manifest.tile as usize));

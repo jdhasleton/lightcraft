@@ -287,7 +287,7 @@ pub fn settings_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         hint(
             ui,
             t,
-            "To use a model of your own instead of the built-in denoiser, install an ONNX file with denoise-model.json beside it. This build offers no model downloads.",
+            "To use a model of your own instead of the built-in denoiser, install an ONNX file, or the safetensors weights of a network LightCraft has written (such as PMRID), with denoise-model.json beside it. This build offers no model downloads.",
         );
     }
     if let Some(job) = downloads.iter().find(|d| d["id"] == "local-install") {

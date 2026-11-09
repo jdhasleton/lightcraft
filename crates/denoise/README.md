@@ -10,6 +10,12 @@ and `run` pack sensor data and blend overlapping tiles while preserving clipped
 highlights. `product` reads/writes the disposable `.lcdn` cache. `runtime` supplies
 the installation self-test. Synthetic networks are generated in Rust for tests.
 
+The `candle` feature adds `candle`: networks LightCraft has written in candle, with
+safetensors weights (`lightcraft_denoise_core::safetensors`), on Metal or the CPU, as tile
+runners with the same contract; PMRID's network is in `lightcraft-denoise-pmrid`
+(Apache-2.0 only, see NOTICE) and `examples/pmrid-convert.rs` converts its published
+weights. Run `cargo test -p lightcraft-denoise --features candle` for both backends.
+
 Run `cargo test -p lightcraft-denoise --features runtime`. The CPU backend is optional;
 featureless and web builds keep the model metadata and cache format without faer/GEMM.
 The `rawnind-model` feature enables the otherwise empty download catalog and requires

@@ -27,6 +27,7 @@ fn model(name: &str, tile: u64) -> (Arc<dyn Model>, lightcraft_denoise::runtime:
         tile: tile as u32,
         overlap: 16,
         gain: Gain::MatchMean { nominal: 1.0, max_deviation: 0.05 },
+        network: Default::default(),
     };
     let loaded = default_loader()(&path, &manifest).unwrap();
     let cpu = lightcraft_denoise::runtime::CpuRunner::load(&path, &manifest).unwrap();
@@ -90,6 +91,7 @@ fn with_remote(path: &Path, tile: u64, addr: &str, sha256: &str) -> Network {
         tile: tile as u32,
         overlap: 16,
         gain: Gain::MatchMean { nominal: 1.0, max_deviation: 0.05 },
+        network: Default::default(),
     };
     let remote = RemoteSide::new(lightcraft_denoise::remote::Remote::new(addr, "remote-test-token-0123", sha256, tile as usize));
     network(path, &manifest, Some(remote)).unwrap()

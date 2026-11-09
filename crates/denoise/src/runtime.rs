@@ -52,7 +52,7 @@ impl CpuRunner {
         self.runner.bytes_per_tile()
     }
     pub fn self_test(&self) -> SelfTest {
-        self_test(self, &self.manifest, self.load_ms)
+        self_test_of(self, &self.manifest, self.load_ms)
     }
 }
 impl TileRunner for CpuRunner {
@@ -60,7 +60,9 @@ impl TileRunner for CpuRunner {
         self.runner.run(input)
     }
 }
-fn self_test(runner: &dyn TileRunner, manifest: &DenoiserManifest, load_ms: f64) -> SelfTest {
+/// The installation self-test of any runner of the model `manifest` describes (`load_ms`: what loading it took): it runs
+/// [`test_tile`] twice and checks the answer is finite, repeatable, of the declared scale and less noisy.
+pub fn self_test_of(runner: &dyn TileRunner, manifest: &DenoiserManifest, load_ms: f64) -> SelfTest {
     let t = manifest.tile as usize;
     let mut checks: Vec<(String, bool)> = Vec::new();
     let (input, base) = test_tile(t);
@@ -285,6 +287,7 @@ mod tests {
             tile,
             overlap: 16,
             gain: Gain::MatchMean { nominal, max_deviation: 0.05 },
+            network: Default::default(),
         }
     }
 
@@ -421,6 +424,7 @@ mod cpu_tests {
             tile: 64,
             overlap: 16,
             gain: Gain::None,
+            network: Default::default(),
         };
         let r = CpuRunner::load(&path, &m).unwrap();
         let x = check_tile(64);

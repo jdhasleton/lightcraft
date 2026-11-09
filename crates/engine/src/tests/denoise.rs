@@ -69,6 +69,7 @@ fn manifest(id: &str) -> DenoiserManifest {
         tile: 64,
         overlap: 16,
         gain: Gain::None,
+        network: Default::default(),
     }
 }
 
@@ -905,5 +906,63 @@ fn without_a_models_folder_the_cache_still_obeys_the_default_limit() {
         assert!(!stray.exists(), "the stray picture goes");
         assert_eq!(x.s.denoise_photo_state(photo(&x.s)), PhotoState::Ready, "the photo's own picture stays");
     }
+    let _ = std::fs::remove_dir_all(&x.dir);
+}
+
+/// A candle network (PMRID's, with weights that blur) installed from its `.safetensors` file through the same command,
+/// self-test and folder as an ONNX model, chosen, and used for an export.
+#[cfg(feature = "denoise")]
+#[test]
+fn a_candle_network_is_installed_from_safetensors_and_makes_the_exported_picture() {
+    use lightcraft_denoise::manifest::{Architecture, Network, NoiseMap};
+    let mut x = setup("candle", false);
+    x.s.denoise.loader = crate::denoise::default_loader();
+    let m = DenoiserManifest {
+        id: "pmrid-blur".into(),
+        network: Network::Safetensors { architecture: Architecture::Pmrid, noise: NoiseMap::None, input_scale: 1.0 },
+        ..manifest("pmrid-blur")
+    };
+    let src = x.dir.join("src-blur");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("denoise-model.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+    std::fs::write(src.join("model.safetensors"), lightcraft_denoise::candle::pmrid::blur_weights().unwrap().to_bytes()).unwrap();
+    let file = src.join("model.safetensors");
+    let info = x.s.execute("denoise.models.inspect", &json!({"path": file})).unwrap();
+    assert_eq!(info["model"]["network"]["format"], "safetensors");
+    assert_eq!(info["alreadyInstalled"], false);
+    // the file must be the kind the manifest names
+    let wrong = x.dir.join("src-wrong");
+    std::fs::create_dir_all(&wrong).unwrap();
+    std::fs::write(wrong.join("denoise-model.json"), serde_json::to_vec(&m).unwrap()).unwrap();
+    std::fs::copy(&file, wrong.join("model.onnx")).unwrap();
+    let e = x.s.execute("denoise.models.install", &json!({"path": wrong.join("model.onnx"), "acknowledged": true})).unwrap_err().to_string();
+    assert!(e.contains(".safetensors"), "{e}");
+    let e = x.s.execute("denoise.models.inspect", &json!({"path": wrong.join("model.onnx")})).unwrap_err().to_string();
+    assert!(e.contains(".safetensors"), "{e}");
+    // installed: tested, copied as model.safetensors, chosen
+    let r = x.s.execute("denoise.models.install", &json!({"path": file, "acknowledged": true})).unwrap();
+    assert_eq!(r["model"], "pmrid-blur");
+    let home = x.dir.join("denoise-models").join("pmrid-blur");
+    assert!(home.join("model.safetensors").is_file() && !home.join("model.onnx").exists() && !home.join("model.safetensors.part").exists());
+    let record: Value = serde_json::from_slice(&std::fs::read(home.join("installed.json")).unwrap()).unwrap();
+    assert_eq!(record["selfTest"]["ok"], true, "{record}");
+    assert_eq!(record["selfTest"]["runtime"], "candle", "{record}");
+    let list = x.s.execute("denoise.models.list", &json!({})).unwrap();
+    assert_eq!(list["model"], "pmrid-blur", "{list}");
+    assert_eq!(x.s.execute("denoise.models.inspect", &json!({"path": file})).unwrap()["alreadyInstalled"], true);
+    // an ONNX model with the same id does not land beside it
+    let onnx = model_files(&x.dir, "pmrid-blur");
+    let e = x.s.execute("denoise.models.install", &json!({"path": onnx, "acknowledged": true})).unwrap_err().to_string();
+    assert!(e.contains("already installed"), "{e}");
+    assert!(!home.join("model.onnx").exists());
+    // the export makes its picture with the network
+    let id = photo(&x.s);
+    set_amount(&mut x.s, 100.0);
+    let o = ExportOptions::from_json(&json!({"format": "png", "width": 160, "height": 160}));
+    assert!(export_photo(&mut x.s, id, &o, 1).is_ok());
+    assert_eq!(std::fs::read_dir(x.dir.join("library").join("denoise")).unwrap().flatten().count(), 1);
+    // removed like any model
+    x.s.execute("denoise.models.remove", &json!({"id": "pmrid-blur"})).unwrap();
+    assert!(!home.exists());
     let _ = std::fs::remove_dir_all(&x.dir);
 }

@@ -1179,6 +1179,7 @@ fn denoise_serve_runs_tiles_for_another_computer() {
         tile: 64,
         overlap: 16,
         gain: Gain::None,
+        network: Default::default(),
     };
     let onnx = dir.join("model.onnx");
     std::fs::write(&onnx, lightcraft_denoise::synthetic::unet_onnx(64, 8, 2, 7)).unwrap();

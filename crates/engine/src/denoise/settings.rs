@@ -83,9 +83,11 @@ pub(crate) fn write_settings(dir: &Path, st: &Settings) -> Result<(), String> {
     write_atomic(&dir.join("settings.json"), &serde_json::to_vec_pretty(st).map_err(|e| e.to_string())?)
 }
 
-/// An installed model folder: `<id>/model.onnx`, `denoise-model.json`, `installed.json`.
+/// An installed model folder: `<id>/model.onnx` (or `model.safetensors`, as its manifest's `network` says),
+/// `denoise-model.json`, `installed.json`.
 pub(crate) struct Installed {
     pub manifest: DenoiserManifest,
+    /// The model file (`model.onnx`, or `model.safetensors` for a candle network).
     pub onnx: PathBuf,
     /// What was recorded when it was installed (terms accepted, hash of the file, self-test).
     pub accepted: Value,
@@ -109,8 +111,7 @@ pub(crate) fn installed_models(dir: &Path) -> Vec<Installed> {
     for e in entries.flatten() {
         let p = e.path();
         let Some(name) = p.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
-        let onnx = p.join("model.onnx");
-        if name == lightcraft_denoise::builtin::ID || !lightcraft_denoise::licence::valid_id(&name) || !p.is_dir() || !onnx.is_file() {
+        if name == lightcraft_denoise::builtin::ID || !lightcraft_denoise::licence::valid_id(&name) || !p.is_dir() {
             continue;
         }
         let Some(m) = read_capped(&p.join("denoise-model.json"), lightcraft_denoise::manifest::MAX_MANIFEST_BYTES)
@@ -118,7 +119,8 @@ pub(crate) fn installed_models(dir: &Path) -> Vec<Installed> {
         else {
             continue;
         };
-        if m.id != name {
+        let onnx = p.join(m.network.file_name());
+        if m.id != name || !onnx.is_file() {
             continue;
         }
         let accepted = read_capped(&p.join("installed.json"), 8192).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);

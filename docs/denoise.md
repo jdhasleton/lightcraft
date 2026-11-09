@@ -43,7 +43,10 @@ non-local-means filter (`crates/denoise-core/src/nlm.rs`) is still there as a fa
 
 To measure a change to it, run the opt-in benchmark on a public CC0 raw (see `cargo xtask corpus`):
 `LC_DENOISE_RAW="$(git rev-parse --show-toplevel)/corpus/raw/arw-sony-a7m3-compressed.arw" LC_DENOISE_OUT=/tmp/dn cargo test --release -p lightcraft-engine --test denoise_builtin_quality -- --ignored --nocapture`
-(the path must be absolute: tests run from the crate's folder).
+(the path must be absolute: tests run from the crate's folder). Built with `--features denoise`, it also scores every
+installed model beside the built-in denoiser, on the same noisy crop and told the same measured noise (the folder
+`LC_DENOISE_MODELS`, else the user's models folder; `LC_CPU=1` runs candle networks on the processor); real pairs instead
+of added noise: see [Real pairs](#real-pairs).
 It adds noise of four known levels to the raw, runs the denoiser and prints the PSNR against the
 original, plus a texture figure (how much of the true picture's fine structure the result keeps; noise
 can't inflate it); `LC_DENOISE_OUT` also writes truth | noisy | denoised PNGs. Use public files only.
@@ -130,12 +133,40 @@ at each level is the lowest that stays within about a quarter of a decibel of th
 noise instead of its estimate, the same filter did the right thing at every level; the new estimator is as good as that from
 ISO 6400 up.
 
+### Real pairs
+
+Added noise is white and its reference is the raw itself; a camera's real noise at a high ISO is neither. The same test
+file scores **real pairs**: tripod shots of one scene at the camera's lowest ISO (the reference) and at higher ISOs, from a
+folder you name (no photo is in the repository):
+
+```text
+LC_DENOISE_PAIRS=/path/to/pairs LC_DENOISE_OUT=/tmp/pairs cargo test --release -p lightcraft-engine --features denoise \
+  --test denoise_builtin_quality real_pairs -- --ignored --nocapture
+```
+
+How to shoot them: camera on a tripod, a still scene with fine detail, flat areas and some shadow, manual focus,
+the same aperture for every shot; the reference at base ISO (ISO 100 on the EOS R and R6 Mark III) with a longer shutter,
+then the same exposure at each higher ISO (shutter shortened by as many stops); a 2 s timer or the electronic shutter.
+Two or three reference shots are averaged, which lowers the reference's own noise. Raw files of any Bayer camera work.
+
+How they are matched (`crates/engine/tests/denoise_quality/pairs.rs`): each subfolder is a scene; else an `iso<N>` in the
+file name names the scene (what is left of the name: `desk_iso100.cr3`, `desk_iso12800.cr3`); else the EXIF does (the same
+camera, frame size, focal length and aperture, shot less than ten minutes apart, `LC_PAIR_GAP` seconds). The ISO comes from
+the EXIF, else the name. Each reference is registered to the noisy shot by whole colour cells (the shift where the first
+green planes correlate best, up to `LC_PAIR_SHIFT` cells, default 4) and scaled plane by plane to its mean (no two exposures
+are exactly equal). Every denoiser runs on the noisy shot's centre window (`LC_PAIR_WINDOW`, default 1536x1024), told the
+noise measured on the whole frame as the app does, and is scored like the added-noise benchmark: PSNR, texture and detail per
+pair, then the mean per denoiser and ISO. `LC_DENOISE_OUT` receives one PNG per pair (reference | noisy | each denoiser).
+The harness itself is tested on synthetic DNG pairs (shifted, exposed differently, noisy at two ISOs) by the same file's
+ordinary tests.
+
 ## Models and terms (optional)
 
 **No model weights are bundled.** Choosing a model replaces the built-in denoiser; **Stop using**
 (or removing the model) goes back to it. Models live in the per-user `denoise-models` folder
 (override with `LIGHTCRAFT_DENOISE_MODELS`). Settings provides **Install from file…**
-for a user-supplied ONNX file with a `denoise-model.json` beside it. The default build
+for a user-supplied ONNX file, or the safetensors weights of a network LightCraft has written in candle (see
+[Candle networks and PMRID](#candle-networks-and-pmrid)), with a `denoise-model.json` beside it. The default build
 offers no model downloads. The separate `rawnind-model` Cargo feature enables the
 pinned RawNIND offer only when a release's model policy permits it.
 Terms must be acknowledged before installation or
@@ -144,8 +175,9 @@ progress, cancellation, size limits and SHA-256 verification.
 
 RawNIND's optional ONNX weights are **GPL-3.0**, as recorded in the pinned model catalog.
 They are downloaded separately after consent and read by our own Rust executor.
-Whether releases should offer this download remains a maintainer policy decision;
-permissively licensed or independently trained weights remain a gap. This is not a
+Whether releases should offer this download remains a maintainer policy decision.
+PMRID's Apache-2.0 weights are a permissively licensed choice a user converts and installs
+([PMRID](#pmrid)); weights LightCraft trains itself remain a gap. This is not a
 claim that optional downloading settles licensing questions. No GPL decoder or neural
 runtime code is included. Model metadata is in `crates/denoise-core/src/known.rs`.
 
@@ -161,7 +193,99 @@ The synchronous command remains available for scripts that require the result im
 The current contract is `bayerToRgb`: normalized, black-subtracted, non-white-balanced
 RGGB planes `[1, 4, tile, tile]` produce camera RGB `[1, 3, 2*tile, 2*tile]`.
 RawNIND uses a 512-cell tile, 64-cell overlap and a mean-matched nominal gain of 1e6.
-See `DenoiserManifest` for the validated JSON schema.
+See `DenoiserManifest` for the validated JSON schema. Its optional `network` says what the model file is: absent (every
+manifest before it), an ONNX file installed as `model.onnx`; `{"format": "safetensors", "architecture": "pmrid", "noise":
+{"kind": "kSigma", "a": …, "b": …}, "inputScale": 256}`, a candle network's weights installed as `model.safetensors`. An
+architecture LightCraft has not written is refused, naming the ones it has, and the file must be of the kind the manifest
+names.
+
+## Candle networks and PMRID
+
+The ONNX executor reads the U-Net operators of the models it was written for. A network LightCraft writes in candle (the
+pure-Rust tensor library SAM 3 runs on, `crates/segment`) can be any shape: its weights come as a safetensors file and its
+layers are Rust (`crates/denoise/src/candle.rs`, the `candle` feature of `lightcraft-denoise`, which the engine's `denoise`
+feature turns on). It is a tile runner with the same `bayerToRgb` contract, so the manifest checks, the installation
+self-test, the cache, the queue, previews and exports are those of every model.
+
+- **Weights are hostile.** The safetensors reader (`crates/denoise-core/src/safetensors.rs`) bounds the file (2 GiB) and its
+  header (16 MiB), and checks that every tensor's bytes lie in the file and match its shape, and that every number is
+  finite (F32 only). The network takes each parameter by name and shape and refuses a file with one missing, of another
+  shape, or one too many. Building and running the network is guarded: an error or a panic inside candle is an error.
+- **Where it runs.** On the processor, and on the graphics card through Metal on macOS: the card is set up for the first
+  photo that may use it, on a thread of its own with the set-up marker and time limit of every card, and checked against the
+  processor on the check tile (at most 1e-2 of white anywhere and 1e-4 on average) and timed. Settings ▸ AI Denoise ▸ Run on
+  applies (Automatic picks the faster). A tile the card gets wrong runs on the processor. Network passes on the card run one
+  at a time: candle 0.9.2's Metal backend gave answers off by up to 1.3 of white when passes from several threads
+  overlapped (`metal_and_the_processor_agree`); mapping and demosaicing around them stay parallel. Other computers
+  (`denoise-serve`) serve ONNX models only for now.
+- **The photo's noise.** A network trained at one noise level is given a photo's noise mapped onto it: each photo gets a
+  model of its own that shares the loaded weights, measures the whole photo's noise once (the built-in denoiser's estimator)
+  and maps every tile by it.
+
+### PMRID
+
+PMRID (Wang et al., "Practical Deep Raw Image Denoising on Mobile Devices", ECCV 2020; https://github.com/MegEngine/PMRID) is
+a small U-Net of separable convolutions (1,031,908 numbers, 4.1 MB) that cleans the four packed planes. Its network is in
+`crates/denoise-pmrid`, which follows the authors' PyTorch definition (`models/net_torch.py`) and is therefore Apache-2.0
+only, like `crates/segment` (see `NOTICE`); its parameter names are theirs, so their checkpoint loads unchanged. LightCraft
+demosaics its answer with the built-in denoiser's demosaic.
+
+**Licence, checked 2026-11-09.** The repository, which holds the weights (`models/torch_pretrained.ckp`), is Apache-2.0; no
+separate terms are stated for the weights. The paper (arXiv 2010.06935, §4.2) says the network was trained on 214 clean long
+exposures (10 s and 30 s, Sony α7S II) from the See-in-the-Dark dataset, whose repository (cchen156/Learning-to-See-in-the-Dark)
+is MIT and states no separate dataset terms, with synthetic Poisson-Gaussian noise of an OPPO Reno 10x phone (ISO 100 to
+6400). Both licences are in the allowlist. Neither names the weight or image files explicitly; that is the extent of what was
+checked. **No weights are bundled or downloaded by LightCraft.**
+
+**Converting and installing.** Once, outside the app, with a Rust example (candle's pickle reader understands tensors only and
+runs no code, so no Python is needed):
+
+```text
+git clone https://github.com/MegEngine/PMRID
+cargo run --release -p lightcraft-denoise --features candle --example pmrid-convert -- PMRID/models/torch_pretrained.ckp pmrid-model
+```
+
+writes `pmrid-model/model.safetensors` (SHA-256 `5a72c334717cfdf0ecf97dc1edd9beb094edc15cb866df3da526a445aeff98ff`, 4,141,344
+bytes, from the checkpoint of commit 8ebb9e8) and `pmrid-model/denoise-model.json`; Settings ▸ AI Denoise ▸ Install from file…
+takes the `.safetensors` (or `denoise.models.install {path, acknowledged: true}`). The manifest: tile 512 cells, overlap 32,
+no gain, and the k-sigma transform to the training noise below.
+
+**Its input.** As the authors' benchmark (`run_benchmark.py`) does: the mosaic clipped to 0..1, the k-sigma transform
+(eq. 7 of the paper) from the photo's noise to the noise of the phone at ISO 1600 (`K(1600)` and `Sigma(1600)` of that
+script's noise model, in 10-bit numbers, V = 959: variance = 1.0093e-3 · x + 3.2397e-6 for x in 0..1), times 256; the answer
+is divided by 256 and transformed back. With the photo's noise `variance = a · x + b`, the transform is `x' = s · x + o`,
+`s = a_train / a`, `o = (s² b − b_train) / a_train` (`k_sigma` in `crates/denoise/src/candle.rs`). Two guard rails keep it
+sane: `s` at most 16 (a clean photo is not brightened far past the 14 times the phone's ISO 100 needed), and `b / a²` at most
+100 (a noise that is nearly all floor, as on a synthetic check tile, would otherwise get a huge offset).
+
+**Speed** (M4 Max, release build, one 512-cell tile, warm): 255 ms on Metal, 282 ms on the processor (candle's own
+multi-threaded kernels); the first tile on Metal also builds its kernels (about 4 s, once per run). The depthwise
+convolutions are unfolded into their taps (each a contiguous copy) and summed by one batched product: 6× faster on the
+processor than one shifted multiply-add per tap (1.75 s), and 1.7× faster on Metal. A whole photo, through the app's export
+path (`lightcraft-cli run --library … --import cr3-canon-r6m3.cr3`, Denoise 100, `LIGHTCRAFT_PROFILE=1`): the 32-megapixel
+R6 Mark III sample is 40 tiles, 13.0 s on Metal one tile at a time (the working-memory estimate allows one), 14.9 s with
+the card's set-up, 17.5 s for the export, 2.4 GB at most in memory; the built-in denoiser takes the same photo in 0.9 s
+(150 tiles, its filter on the card). Speed is PMRID's weak point here: its depthwise convolutions in our own WGSL kernels,
+as the ONNX executor and the built-in filter have (`crates/gpu`), would be the next step; candle's grouped convolution runs
+one call per channel.
+
+**Measured** (the benchmark above, 1536 × 1024 centre crops of public CC0 raws from `cargo xtask corpus`, PMRID on Metal,
+2026-11-09; PSNR gain over the noisy picture in dB / texture, built-in → PMRID):
+
+| Raw, noise | | | | | |
+|---|---|---|---|---|---|
+| Sony A7 III, added noise | light +3.63 / 0.41 → **+5.68 / 0.61** | medium +7.72 / 0.24 → **+9.06 / 0.38** | heavy +10.13 / 0.13 → **+11.10 / 0.21** | extreme +10.61 / 0.09 → **+11.90 / 0.12** | |
+| Canon EOS R (C-RAW), `LC_REAL` levels | ISO 400 **+2.87 / 0.54** → +1.84 / 0.26 | 1600 +7.29 / 0.38 → **+7.90** / 0.25 | 6400 +10.16 / 0.30 → **+10.99** / 0.24 | 25600 +12.97 / 0.26 → **+14.33** / 0.23 | 51200 +16.95 / 0.21 → **+21.63** / 0.20 |
+| Canon EOS R6 Mark III, `LC_REAL` levels | ISO 400 +2.73 / 0.79 → **+2.98** / 0.64 | 1600 +5.49 / 0.71 → **+8.33** / 0.61 | 6400 +8.11 / 0.65 → **+11.17** / 0.58 | 25600 +11.91 / 0.59 → **+14.58** / 0.53 | 51200 +13.97 / 0.51 → **+17.36** / 0.44 |
+
+PMRID gains more than the built-in denoiser everywhere except the EOS R at the ISO 400 level, by 0.6 to 4.7 dB from ISO 1600
+up, and keeps more texture on the added-noise levels, but less of the true fine structure than the built-in at the measured
+Canon levels (it smooths more; the R6 Mark III crops show a cleaner picture with the finest branches a little softer). The
+EOS R sample's centre is out-of-focus background, so its texture figures say little. Each crop took 0.6 s with PMRID on
+Metal and 0.3 to 0.9 s with the built-in denoiser on four processor threads. The Sony sample is itself noisy (its own noise
+reads 0.018 at mid-grey), so the `LC_REAL` levels below ISO 25600 cannot be measured on it. All of this is added white noise;
+the real test is [Real pairs](#real-pairs), which have not been run yet. PMRID was trained for one phone's sensor, and no
+comparison with Lightroom is claimed.
 
 ## Photos, previews and exports
 

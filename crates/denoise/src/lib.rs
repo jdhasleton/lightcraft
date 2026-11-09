@@ -13,12 +13,16 @@
 //! - [`cpu`] and [`runtime`]: a single-thread pure-Rust CPU runner and its installation self-test.
 //! - [`net`] and [`onnx`]: checked plain network data and bounded ONNX decoding, shared by CPU and GPU.
 //! - [`remote`]: running tiles on another computer's graphics card over TCP (a [`run::TileRunner`] and its server).
+//! - `candle` (feature `candle`): networks written for LightCraft in candle with safetensors weights (PMRID), on Metal
+//!   or the processor, as a [`run::TileRunner`] with the same contract.
 //!
 //! Everything here treats model files, manifests and cache files as hostile input: sizes are capped, numbers must
 //! be finite, and a malformed file is an error, never a panic.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(all(feature = "candle", not(target_arch = "wasm32")))]
+pub mod candle;
 #[cfg(feature = "runtime")]
 pub mod cpu;
 

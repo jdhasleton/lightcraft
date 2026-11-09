@@ -42,6 +42,15 @@ the facebook/sam3 checkpoint only when they choose to (in the app, or by hand), 
 License (https://github.com/facebookresearch/sam3/blob/main/LICENSE), a separate, non-OSI
 licence. See docs/ai-masks.md.
 
+crates/denoise-pmrid (lightcraft-denoise-pmrid) follows the PMRID network definition
+(https://github.com/MegEngine/PMRID, models/net_torch.py) by the PMRID authors (Wang et al., ECCV
+2020; the repository names no other copyright holder), licensed under the Apache License 2.0. The work was modified by the LightCraft contributors (2026): translated from
+Python/PyTorch to Rust on candle, with its convolutions computed another way; the file says so.
+Because of this, crates/denoise-pmrid is licensed under the Apache License 2.0 only (LICENSE-APACHE),
+not under the MIT option. The PMRID weights are not part of LightCraft: a user converts the
+authors' published checkpoint (Apache-2.0) with crates/denoise/examples/pmrid-convert.rs and
+installs it. See docs/denoise.md.
+
 AI denoise weights are not part of LightCraft and are never distributed with it.
 The default build offers user-supplied models only. The optional rawnind-model
 feature offers a separately downloaded RawNIND UtNet2 Bayer checkpoint under

@@ -46,6 +46,7 @@ fn rawnind_bayer() -> Known {
         tile: 512,
         overlap: 64,
         gain: Gain::MatchMean { nominal: 1.0e6, max_deviation: 0.05 },
+        network: Default::default(),
     };
     let download = Download {
         id: manifest.id.clone(),

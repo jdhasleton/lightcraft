@@ -51,6 +51,11 @@ pub(crate) trait Model: Send + Sync {
     /// What runs a photo's tiles, and how many to run at once, when `threads` may be used and the setting is `run_on`
     /// (a graphics card is kept busy by a few). The first time the card may be used it is set up and checked here.
     fn runner(&self, run_on: RunOn, threads: usize) -> (&dyn TileRunner, usize);
+    /// A model of its own for one photo, sharing what is loaded, for a model that keeps something of the photo
+    /// ([`Model::prepare`]) and is shared by photos made at the same time; `None`: this one serves every photo.
+    fn for_photo(&self) -> Option<Arc<dyn Model>> {
+        None
+    }
     /// Called once per photo with its whole mosaic before the tiles run, for a model that adapts to the photo.
     fn prepare(&self, _mosaic: &[f32], _width: usize, _height: usize) {}
     /// Check it does something sensible: the test's result, or why not. Unless `run_on` is the processor the graphics
@@ -354,11 +359,15 @@ impl Model for Network {
     }
 }
 
-/// The loader of this build: our pure-Rust executor with the `denoise` feature, else one that says why nothing can run.
+/// The loader of this build: our pure-Rust executor with the `denoise` feature (ONNX files, and candle networks with
+/// safetensors weights), else one that says why nothing can run.
 pub(crate) fn default_loader() -> Loader {
     #[cfg(feature = "denoise")]
     {
         Arc::new(|path, manifest| {
+            if !manifest.network.is_onnx() {
+                return Ok(Arc::new(super::candle::load(path, manifest)?) as Arc<dyn Model>);
+            }
             // the server must run this very file: identified by the manifest's hash, else the file's
             let sha256 = match &manifest.sha256 {
                 Some(h) => Some(h.clone()),
@@ -420,6 +429,9 @@ pub fn serving(dir: Option<&Path>, id: Option<&str>, run_on: RunOn) -> Result<Se
         .find(|m| m.manifest.id == want)
         .ok_or_else(|| format!("no installed denoise model `{want}` in {}", dir.display()))?;
     let m = &installed.manifest;
+    if !m.network.is_onnx() {
+        return Err(format!("`{}` is a candle network: only ONNX models can be served to other computers for now", m.id));
+    }
     // the same identity a client derives (see `default_loader`)
     let sha256 = match &m.sha256 {
         Some(h) => h.clone(),

@@ -49,6 +49,7 @@ pub fn manifest() -> DenoiserManifest {
         tile: TILE,
         overlap: OVERLAP,
         gain: Gain::None,
+        network: Default::default(),
     }
 }
 
@@ -109,6 +110,15 @@ impl TileRunner for Builtin {
     fn run(&self, input: &[f32]) -> Result<Vec<f32>, Error> {
         self.run_with(input, &|planes, t, noise| Ok(self.filter_on_cpu(planes, t, noise)))
     }
+}
+
+/// The noise of one tile (four planes `[R, G1, G2, B]` of `t × t` cells) as `(a, b)`, variance = `a · signal + b`:
+/// what a runner that was not told the photo's noise ([`measure_noise`]) cleans a tile by. `None` when `input` is not
+/// four square planes.
+pub fn tile_noise(input: &[f32]) -> Option<(f32, f32)> {
+    let t = side_of(input.len())?;
+    let clean: Vec<f32> = input.iter().map(|v| if v.is_finite() { *v } else { 0.0 }).collect();
+    Some(noise_model(&clean.chunks_exact(t * t).collect::<Vec<_>>(), t))
 }
 
 /// The side of the planes of a tile of `len` values, if it is four squares.

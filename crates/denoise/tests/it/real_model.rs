@@ -196,6 +196,7 @@ fn the_real_model_denoises_real_mosaics() {
         tile: 512,
         overlap: 64,
         gain: Gain::MatchMean { nominal: 1.0e6, max_deviation: 0.05 },
+        network: Default::default(),
     };
     let runner = CpuRunner::load(Path::new(&model), &manifest).unwrap();
     let params = Params { tile: 512, overlap: 64, gain: manifest.gain, clip: Some(1.0), parallel };

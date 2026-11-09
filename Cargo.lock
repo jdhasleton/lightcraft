@@ -3696,9 +3696,12 @@ dependencies = [
 name = "lightcraft-denoise"
 version = "0.18.0"
 dependencies = [
+ "candle-core",
  "faer-core",
  "lightcraft-denoise-core",
+ "lightcraft-denoise-pmrid",
  "lightcraft-raster",
+ "lightcraft-testkit",
  "miniz_oxide 0.9.1",
  "proptest",
  "rayon",
@@ -3723,6 +3726,14 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "web-time",
+]
+
+[[package]]
+name = "lightcraft-denoise-pmrid"
+version = "0.18.0"
+dependencies = [
+ "candle-core",
+ "lightcraft-denoise-core",
 ]
 
 [[package]]

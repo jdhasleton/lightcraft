@@ -37,6 +37,8 @@ use crate::model_download::Downloads;
 use crate::{Selection, Session};
 
 mod builtin;
+#[cfg(feature = "denoise")]
+mod candle;
 mod gpu;
 mod model;
 mod products;

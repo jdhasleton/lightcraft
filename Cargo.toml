@@ -20,6 +20,7 @@ craft-window = { git = "https://github.com/storytold/craft-libs", rev = "c5a1cbf
 # internal
 lightcraft-denoise-core = { path = "crates/denoise-core" }
 lightcraft-denoise = { path = "crates/denoise", default-features = false }
+lightcraft-denoise-pmrid = { path = "crates/denoise-pmrid" }
 lightcraft-geom = { path = "crates/geom" }
 lightcraft-faces = { path = "crates/faces" }
 lightcraft-sysmem = { path = "crates/sysmem" }

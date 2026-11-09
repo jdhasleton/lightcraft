@@ -42,6 +42,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("wincolor", Class::Layer(0)),
     ("fetch", Class::Layer(0)),
     ("denoise-core", Class::Layer(1)),
+    ("denoise-pmrid", Class::Layer(1)),
     ("denoise", Class::Layer(1)),
     ("heif", Class::Layer(0)),
     ("raw", Class::Layer(1)),
@@ -79,7 +80,7 @@ pub const TABLE: &[(&str, Class)] = &[
 pub const INTRA_LAYER_ORDER: &[&[&str]] = &[
     &["geom", "color", "raster"],
     &["tiff", "raster"],
-    &["denoise-core", "denoise"],
+    &["denoise-core", "denoise-pmrid", "denoise"],
     &["meta", "raw"],
     &["meta", "codecs"],
     &["meta", "develop"],

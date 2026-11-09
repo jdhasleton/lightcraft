@@ -2,7 +2,8 @@
 //! work (queue, cancel, status, pump, clear). The machinery they drive is [`crate::denoise`].
 //!
 //! Models live in the folder the host provides (`Session::denoise.models_dir`): one subfolder per model with
-//! `model.onnx`, `denoise-model.json` (its manifest) and `installed.json` (what the user accepted and the file's hash),
+//! `model.onnx` (or `model.safetensors` for a candle network), `denoise-model.json` (its manifest) and `installed.json`
+//! (what the user accepted and the file's hash),
 //! plus `settings.json` beside them. Model files, archives and manifests are hostile input: sizes are capped, ids are
 //! validated before they become folder names, and nothing outside a model's own folder is ever touched.
 
@@ -112,22 +113,44 @@ fn identify(path: &Path, c: &str, sha_known: Option<&str>) -> Result<Source> {
     if let Some(m) = known::by_sha256(&sha256) {
         return Ok(Source { manifest: m, entry: None, file_name });
     }
-    // an `.onnx` with its manifest beside it
+    // an `.onnx` (or the `.safetensors` of a candle network) with its manifest beside it
     let sibling = path.with_file_name("denoise-model.json");
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("onnx"))
+    if is_model_file(path)
         && let Some(bytes) = read_capped(&sibling, MAX_MANIFEST_BYTES)
     {
         let m = manifest::parse(&bytes).map_err(|e| bad(c, format!("{}: {e}", sibling.display())))?;
         if m.id == lightcraft_denoise::builtin::ID {
             return Err(bad(c, "the id `builtin` is LightCraft's own denoiser: give the model another id in its denoise-model.json"));
         }
+        file_matches(path, &m, c)?;
         return Ok(Source { manifest: m, entry: None, file_name });
     }
     Err(bad(
         c,
-        "LightCraft does not know this file. A denoise model is an .onnx file with a denoise-model.json beside it that says how to use it \
-         (see docs/denoise.md), or an archive LightCraft can fetch itself (`denoise.models.download`)",
+        "LightCraft does not know this file. A denoise model is an .onnx file (or the .safetensors weights of a network LightCraft \
+         has written, such as PMRID) with a denoise-model.json beside it that says how to use it (see docs/denoise.md), or an \
+         archive LightCraft can fetch itself (`denoise.models.download`)",
     ))
+}
+
+/// Whether a model of either kind is installed in its folder `home` (an installed id is immutable: a model of the other kind
+/// with the same id must not land beside it and take over its manifest).
+fn holds_a_model(home: &Path) -> bool {
+    [manifest::Network::Onnx.file_name(), "model.safetensors"].iter().any(|f| home.join(f).exists())
+}
+
+/// Whether `path` has the extension of a model file (`.onnx`, `.safetensors`).
+fn is_model_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| manifest::MODEL_EXTENSIONS.iter().any(|m| e.eq_ignore_ascii_case(m)))
+}
+
+/// The file must be the kind its manifest describes: an `.onnx` for an ONNX model, a `.safetensors` for a candle network.
+fn file_matches(path: &Path, m: &DenoiserManifest, c: &str) -> Result<()> {
+    let want = m.network.extension();
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case(want)) {
+        return Ok(());
+    }
+    Err(bad(c, format!("denoise-model.json describes a .{want} model, but this file is not one (see `network` in docs/denoise.md)")))
 }
 
 /// Install the model in `src`. A model that passes its self-test becomes the one in use (`activate`, the default): installing
@@ -154,12 +177,13 @@ fn install_file(loader: &crate::denoise::Loader, request: InstallFile<'_>) -> Re
         ));
     }
     let home = dir.join(&m.id);
-    if home.join("model.onnx").exists() {
+    let file = m.network.file_name();
+    if holds_a_model(&home) {
         return Err(bad(c, "that model is already installed; remove it before installing a replacement"));
     }
     std::fs::create_dir_all(&home).map_err(|e| fail("could not create the model's folder", e))?;
     let mut cleanup = InstallCleanup { home: home.clone(), armed: true };
-    let (part, final_path) = (home.join("model.onnx.part"), home.join("model.onnx"));
+    let (part, final_path) = (home.join(format!("{file}.part")), home.join(file));
     let _ = std::fs::remove_file(&part);
     let placed: Result<()> = match ident.entry {
         Some(entry) => {
@@ -189,7 +213,7 @@ fn install_file(loader: &crate::denoise::Loader, request: InstallFile<'_>) -> Re
         }
     };
     // An installed id is immutable: installing again must never destroy a usable model.
-    if final_path.exists() {
+    if holds_a_model(&home) {
         let _ = std::fs::remove_file(&part);
         return Err(bad(c, "that model is already installed; remove it before installing a replacement"));
     }
@@ -216,7 +240,7 @@ struct InstallCleanup {
 impl Drop for InstallCleanup {
     fn drop(&mut self) {
         if self.armed {
-            for name in ["model.onnx.part", "model.onnx", "denoise-model.json", "installed.json"] {
+            for name in ["model.onnx.part", "model.onnx", "model.safetensors.part", "model.safetensors", "denoise-model.json", "installed.json"] {
                 let _ = std::fs::remove_file(self.home.join(name));
             }
             let _ = std::fs::remove_dir(&self.home);
@@ -316,26 +340,30 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "denoise.models.inspect";
     let path = str_param(p, "path").ok_or_else(|| bad(C, "missing `path`"))?;
     let src = Path::new(path);
-    if !src.extension().is_some_and(|e| e.eq_ignore_ascii_case("onnx")) {
-        return Err(bad(C, "choose an .onnx file with denoise-model.json beside it"));
+    if !is_model_file(src) {
+        return Err(bad(C, "choose an .onnx or .safetensors file with denoise-model.json beside it"));
     }
     let sibling = src.with_file_name("denoise-model.json");
     let Some(bytes) = read_capped(&sibling, MAX_MANIFEST_BYTES) else {
+        let ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
         let why = if sibling.is_file() {
-            "denoise-model.json could not be read or is too large"
+            "denoise-model.json could not be read or is too large".to_string()
         } else if src.with_file_name("model.json").is_file() {
             // other apps ship their models with a model.json of their own (#1381)
-            "No denoise-model.json beside this .onnx file. The model.json there is another app's description, which LightCraft \
-             does not read: it needs its own denoise-model.json (see docs/denoise.md)"
+            format!(
+                "No denoise-model.json beside this .{ext} file. The model.json there is another app's description, which LightCraft \
+                 does not read: it needs its own denoise-model.json (see docs/denoise.md)"
+            )
         } else {
-            "No denoise-model.json beside this .onnx file: LightCraft needs one that says how to use the model (see docs/denoise.md)"
+            format!("No denoise-model.json beside this .{ext} file: LightCraft needs one that says how to use the model (see docs/denoise.md)")
         };
         return Err(bad(C, why));
     };
     let m = manifest::parse(&bytes).map_err(|e| bad(C, format!("denoise-model.json: {e} (see docs/denoise.md)")))?;
+    file_matches(src, &m, C)?;
     let dir = models_dir(s, C)?;
     Ok(json!({"kind": "model", "domain": "denoise", "path": path, "fileName": src.file_name().map(|n| n.to_string_lossy()), "model": m,
-        "sizeBytes": std::fs::metadata(src).ok().map(|m| m.len()), "alreadyInstalled": dir.join(&m.id).join("model.onnx").is_file()}))
+        "sizeBytes": std::fs::metadata(src).ok().map(|m| m.len()), "alreadyInstalled": dir.join(&m.id).join(m.network.file_name()).is_file()}))
 }
 
 /// What an error says, without the command it came from (for a line shown to the user).
@@ -657,7 +685,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(query "denoise.models.list", "Denoise Models", [], None, "{} → {dir, productsDir, model, runtime, auto, cacheGb, threads, runOn, models: [{id, name, version, licence{name, commercial, url, notice}, provenance, source, sizeBytes, sha256, tile, known, downloadHost, installed, selected, accepted}]}", always, list),
         cmd!(query "denoise.models.inspect", "Inspect Denoise Model", [], None, "{path} → model terms from an adjacent manifest; never executes the file", always, inspect),
-        cmd!(query "denoise.models.install", "Install Denoise Model", [], None, "{path, acknowledged: true, activate?: true, background?: false} → {installed, model} or {started} — install a denoise model from a file: an .onnx with a denoise-model.json beside it, or an archive LightCraft knows (the darktable `.dtmodel`). `acknowledged` must be true: the user has been shown the model's licence and accepted it. Unless `activate` is false it becomes the model in use", always, install),
+        cmd!(query "denoise.models.install", "Install Denoise Model", [], None, "{path, acknowledged: true, activate?: true, background?: false} → {installed, model} or {started} — install a denoise model from a file: an .onnx (or a candle network's .safetensors) with a denoise-model.json beside it, or an archive LightCraft knows (the darktable `.dtmodel`). `acknowledged` must be true: the user has been shown the model's licence and accepted it. Unless `activate` is false it becomes the model in use", always, install),
         cmd!(query "denoise.models.download", "Download Denoise Model", [], None, "{id, acknowledged: true} → {started, from} — fetch a model LightCraft has a pinned address for (see `downloadHost` in the list) in the background over HTTPS with lightcraft-fetch. `acknowledged` must be true: the user has been shown the model's terms and accepted them. It is checked against its size and SHA-256, installed and chosen by itself; `denoise.models.downloads` shows how far it is", always, download),
         cmd!(query "denoise.models.downloads", "Denoise Model Downloads", [], None, "{} → {running, downloads: [{id, state: running | done | installed | failed | cancelled, bytes, total, error, from}]} — also installs any download that has arrived", always, downloads),
         cmd!(query "denoise.models.downloadCancel", "Cancel Denoise Model Download", [], None, "{id} → {discarded} — stop a download, or delete a finished one that was not installed", always, download_cancel),
