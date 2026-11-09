@@ -46,6 +46,9 @@ pub enum Kind {
     /// ([`SUBJECT_CONCEPTS`], in order); when it finds none, the most prominent object, by a
     /// click where the photo's centre-weighted contrast peaks ([`salient_point`]).
     Subject,
+    /// Concepts combined (People parts, Landscape classes): the union of the groups, each the
+    /// union of its `include` phrases less its `exclude` phrases ([`concept_logits`]).
+    Concepts(Vec<Concept>),
     /// A zoomed-in pass over `region` (normalized) of the photo, rendered by the job's `render`.
     Detail {
         prompt: Prompt,
@@ -60,6 +63,14 @@ pub enum Kind {
     FailOnGpu {
         panic: bool,
     },
+}
+
+/// One group of a [`Kind::Concepts`] request: what its selection is made of, and what is taken
+/// out of it (each a concept prompt for the model).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Concept {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 /// One request.
@@ -426,10 +437,14 @@ fn remote_job(state: &mut State, shared: &Shared, job: &mut Job, endpoint: &str)
     if matches!(job.kind, Kind::Subject) {
         return remote_subject(client, job);
     }
+    if let Kind::Concepts(groups) = &job.kind {
+        let groups = groups.clone();
+        return remote_concepts(client, job, &groups);
+    }
     let mut region = None;
     let operation = match std::mem::replace(&mut job.kind, Kind::Prepare) {
         Kind::Prepare => Operation::Prepare,
-        Kind::Subject => return Err("the subject is selected by remote_subject".into()),
+        Kind::Subject | Kind::Concepts(_) => return Err("the subject and concept groups are selected above".into()),
         Kind::Text(text) => Operation::Text(text),
         Kind::Clicks(clicks) => Operation::Clicks(clicks.iter().map(|c| [c.x, c.y, if c.positive { 1.0 } else { 0.0 }]).collect()),
         Kind::Detail { prompt, region: r } => {
@@ -490,6 +505,10 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placeme
         Kind::Text(text) => {
             let (m, enc) = encoded(state, shared, job, placement)?;
             Ok(text_logits(m, enc, &text)?.map(|l| SegMask::from_logits(side, &l)))
+        }
+        Kind::Concepts(groups) => {
+            let (m, enc) = encoded(state, shared, job, placement)?;
+            Ok(concept_logits(&groups, |phrase| text_logits(m, enc, phrase))?.map(|l| SegMask::from_logits(side, &l)))
         }
         Kind::Subject => {
             {
@@ -564,27 +583,70 @@ fn covers_enough(logits: &[f32]) -> bool {
     inside as f32 >= MIN_SUBJECT_FRACTION * logits.len().max(1) as f32
 }
 
+/// The logits of concept `groups`, asking `ask` for each phrase (`None`: the phrase matches
+/// nothing): within a group, the union (the larger logit) of its include phrases, cut by each
+/// exclude phrase that matches (the logit becomes at most the negated excluded one, so where the
+/// excluded thing surely is the selection surely is not); across groups, the union. `None` when
+/// no include phrase matches; excludes that match nothing change nothing.
+fn concept_logits<E>(groups: &[Concept], mut ask: impl FnMut(&str) -> Result<Option<Vec<f32>>, E>) -> Result<Option<Vec<f32>>, E> {
+    fn union(into: &mut Option<Vec<f32>>, more: Vec<f32>) {
+        match into {
+            Some(a) => a.iter_mut().zip(more).for_each(|(a, b)| *a = a.max(b)),
+            None => *into = Some(more),
+        }
+    }
+    let mut out: Option<Vec<f32>> = None;
+    for group in groups {
+        let mut got: Option<Vec<f32>> = None;
+        for phrase in &group.include {
+            if let Some(l) = ask(phrase)? {
+                union(&mut got, l);
+            }
+        }
+        let Some(mut got) = got else { continue };
+        for phrase in &group.exclude {
+            if let Some(l) = ask(phrase)? {
+                got.iter_mut().zip(l).for_each(|(a, b)| *a = a.min(-b));
+            }
+        }
+        union(&mut out, got);
+    }
+    Ok(out)
+}
+
+/// Sends `operation` for `job`'s photo to the remote worker. The photo (`input`) goes with the
+/// first request of a photo and look; the worker keeps it under the job's key for the following.
+fn remote_send(client: &mut remote::Client, key: u64, input: &Input, operation: Operation) -> Result<Option<Vec<f32>>, String> {
+    let fresh = client.key != Some(key);
+    let (rgb, w, h): (&[u8], usize, usize) = if fresh { (&input.rgb, input.w, input.h) } else { (&[], 0, 0) };
+    let logits = client.request(&Request { width: w, height: h, temporary: false, operation }, rgb)?;
+    client.key = Some(key);
+    Ok(logits)
+}
+
 /// [`Kind::Subject`] on a remote worker: the concepts in turn, then a click at the most
 /// prominent point. The photo is sent once; the worker keeps it for the following requests.
 fn remote_subject(client: &mut remote::Client, job: &mut Job) -> Result<Option<SegMask>, String> {
     let key = job.key;
     let input = render(job)?;
     let salient = salient_point(&input.rgb, input.w, input.h);
-    let mut send = |operation: Operation| -> Result<Option<Vec<f32>>, String> {
-        let fresh = client.key != Some(key);
-        let (rgb, w, h): (&[u8], usize, usize) = if fresh { (&input.rgb, input.w, input.h) } else { (&[], 0, 0) };
-        let logits = client.request(&Request { width: w, height: h, temporary: false, operation }, rgb)?;
-        client.key = Some(key);
-        Ok(logits)
-    };
     let side = lightcraft_segment::MASK_SIDE;
     for concept in SUBJECT_CONCEPTS {
-        if let Some(l) = send(Operation::Text((*concept).to_string()))?.filter(|l| covers_enough(l)) {
+        if let Some(l) = remote_send(client, key, &input, Operation::Text((*concept).to_string()))?.filter(|l| covers_enough(l)) {
             return Ok(Some(SegMask::from_logits(side, &l)));
         }
     }
     let Some((x, y)) = salient else { return Ok(None) };
-    Ok(send(Operation::ClicksWhole(vec![[x, y, 1.0]]))?.map(|l| SegMask::from_logits(side, &l)))
+    Ok(remote_send(client, key, &input, Operation::ClicksWhole(vec![[x, y, 1.0]]))?.map(|l| SegMask::from_logits(side, &l)))
+}
+
+/// [`Kind::Concepts`] on a remote worker: one text request per phrase, combined here as the
+/// local worker combines them ([`concept_logits`]).
+fn remote_concepts(client: &mut remote::Client, job: &mut Job, groups: &[Concept]) -> Result<Option<SegMask>, String> {
+    let key = job.key;
+    let input = render(job)?;
+    let logits = concept_logits(groups, |phrase| remote_send(client, key, &input, Operation::Text(phrase.to_string())))?;
+    Ok(logits.map(|l| SegMask::from_logits(lightcraft_segment::MASK_SIDE, &l)))
 }
 
 /// Where the photo's centre-weighted local contrast peaks (normalized coordinates): the click
@@ -684,6 +746,43 @@ mod tests {
 
     /// The fallback click lands on a small bright thing in a flat photo, and on the centre
     /// weighting's peak when nothing stands out; no buffer, no point.
+    /// Concept groups: include phrases unite, exclude phrases cut (where the excluded thing surely
+    /// is, the selection surely is not), groups unite, nothing found is `None`, and an exclude that
+    /// matches nothing changes nothing.
+    #[test]
+    fn concept_groups_unite_their_includes_and_cut_their_excludes() {
+        let table = |phrase: &str| -> Result<Option<Vec<f32>>, String> {
+            Ok(match phrase {
+                "face" => Some(vec![8.0, 8.0, 8.0, -8.0]),
+                "eyes" => Some(vec![-8.0, -8.0, 8.0, -8.0]),
+                "hair" => Some(vec![-8.0, -8.0, -8.0, 8.0]),
+                "lips" => Some(vec![-8.0, 2.0, -8.0, -8.0]),
+                "nothing" | "beard" => None,
+                other => return Err(format!("unexpected phrase {other}")),
+            })
+        };
+        let group = |include: &[&str], exclude: &[&str]| Concept {
+            include: include.iter().map(|s| s.to_string()).collect(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        };
+        // face skin: the face less the eyes (and a beard that isn't there)
+        let skin = concept_logits(&[group(&["face"], &["eyes", "beard"])], table).unwrap().unwrap();
+        assert_eq!(skin, vec![8.0, 8.0, -8.0, -8.0]);
+        // a soft exclude only lowers: lips at 2.0 cap the face at -2.0 there
+        assert_eq!(concept_logits(&[group(&["face"], &["lips"])], table).unwrap().unwrap(), vec![8.0, -2.0, 8.0, -8.0]);
+        // two parts: the union of face skin and hair
+        let both = concept_logits(&[group(&["face"], &["eyes"]), group(&["hair"], &[])], table).unwrap().unwrap();
+        assert_eq!(both, vec![8.0, 8.0, -8.0, 8.0]);
+        // phrases within a group unite too
+        assert_eq!(concept_logits(&[group(&["eyes", "hair"], &[])], table).unwrap().unwrap(), vec![-8.0, -8.0, 8.0, 8.0]);
+        // nothing found at all, and a group that finds nothing drops out of the union
+        assert_eq!(concept_logits(&[group(&["nothing"], &["eyes"])], table).unwrap(), None);
+        assert_eq!(concept_logits(&[group(&["nothing"], &[]), group(&["hair"], &[])], table).unwrap().unwrap(), vec![-8.0, -8.0, -8.0, 8.0]);
+        assert_eq!(concept_logits::<String>(&[], table).unwrap(), None);
+        // the model's error comes back
+        assert!(concept_logits(&[group(&["?"], &[])], table).is_err());
+    }
+
     #[test]
     fn the_salient_point_finds_what_stands_out() {
         let (w, h) = (120usize, 80usize);

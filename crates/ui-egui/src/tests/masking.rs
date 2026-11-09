@@ -1793,6 +1793,94 @@ fn ai_masks_without_the_model_offer_the_download() {
     assert!(t.elapsed() < SETTLE, "{:?}", t.elapsed());
 }
 
+/// People and Landscape are the model's (their parts and classes are concepts it is asked for):
+/// without it their tiles offer the download like Object and Describe do, open no chooser and
+/// leave no mask behind; a build without AI masks says so.
+#[test]
+fn people_and_landscape_tiles_offer_the_model_download() {
+    use crate::state::Dialog;
+    use lightcraft_engine::segment::Segmenter;
+    let mut h = detail("panel.masking");
+    let dir = std::env::temp_dir().join(format!("lc-ui-no-sam3-people-{}", std::process::id()));
+    h.app.session.segmenter.dir = Some(dir.clone());
+    h.app.session.segmenter.mirrors_file = Some(dir.join("none.txt"));
+    for (tile, kind) in [("maskNew:people", "people"), ("maskNew:landscape", "landscape")] {
+        h.app.ui.dialog = None;
+        h.step();
+        let r = h.request("ui.clickWidget", json!({"id": tile}), T);
+        assert_eq!(r["ok"], true, "{r}");
+        if Segmenter::AVAILABLE {
+            assert_eq!(h.app.ui.dialog, Some(Dialog::SamModel { then: Some((kind.into(), "new".into())), error: None }));
+            assert!(h.app.ui.people.is_none() && h.app.ui.landscape.is_none(), "{kind}: no chooser without the model");
+        } else {
+            // a build without AI masks has nothing to download: the chooser opens and its command
+            // falls back to the heuristics, as Subject does
+            assert_eq!(h.app.ui.dialog, None);
+            assert!(h.app.ui.people.is_some() || h.app.ui.landscape.is_some(), "{kind}");
+            h.app.ui.people = None;
+            h.app.ui.landscape = None;
+        }
+    }
+    assert!(develop(&h).masks.is_empty());
+    assert!(!h.app.session.segmenter.download_status().running, "nothing downloads without a yes");
+}
+
+/// The People and Landscape tiles open a chooser under the tiles: the parts ticked (Entire Person
+/// to begin with) or the class clicked make the mask, stored by id; without a model folder the
+/// heuristics stand in at once (nothing pending, no download offer); Escape and Cancel close a
+/// chooser, opening one closes the other, and a chooser under the selected mask combines.
+#[test]
+fn people_and_landscape_tiles_pick_parts_and_classes() {
+    let mut h = detail("panel.masking");
+    h.app.session.segmenter.dir = None;
+    click(&mut h, "maskNew:people");
+    assert_eq!(h.app.ui.people, Some(("new".into(), vec!["entirePerson".into()])));
+    h.step();
+    click(&mut h, "maskPeoplePart:hair");
+    click(&mut h, "maskPeoplePart:lips");
+    click(&mut h, "maskPeoplePart:entirePerson");
+    assert_eq!(h.app.ui.people.as_ref().unwrap().1, vec!["hair".to_string(), "lips".to_string()]);
+    click(&mut h, "button:maskPeopleGo");
+    assert_eq!(h.app.ui.people, None, "the chooser closes once the mask is made");
+    let d = develop(&h);
+    assert_eq!(d.masks.len(), 1);
+    // the panel's order (Lips is listed before Hair), not the ticking order
+    assert!(matches!(&d.masks[0].components[0].shape, MaskShape::People { parts, seg: None, .. } if parts == &["lips", "hair"]), "{:?}", d.masks[0]);
+    // Landscape: one class per click
+    click(&mut h, "maskNew:landscape");
+    assert_eq!(h.app.ui.landscape.as_deref(), Some("new"));
+    h.step();
+    click(&mut h, "button:maskLandscape:water");
+    assert_eq!(h.app.ui.landscape, None);
+    let d = develop(&h);
+    assert_eq!(d.masks.len(), 2);
+    assert!(matches!(&d.masks[1].components[0].shape, MaskShape::Landscape { class, seg: None, .. } if class == "water"), "{:?}", d.masks[1]);
+    assert!(!h.app.session.segmenter.busy(), "nothing was sent to a model");
+    assert_eq!(h.app.ui.dialog, None, "no download offer");
+    // opening one chooser closes the other; Escape and Cancel close them
+    click(&mut h, "maskNew:people");
+    click(&mut h, "maskNew:landscape");
+    assert!(h.app.ui.people.is_none() && h.app.ui.landscape.is_some());
+    h.step();
+    let _ = h.request("ui.key", json!({"key": "Escape"}), T);
+    h.step();
+    assert_eq!(h.app.ui.landscape, None);
+    click(&mut h, "maskNew:people");
+    h.step();
+    click(&mut h, "button:maskPeopleCancel");
+    assert_eq!(h.app.ui.people, None);
+    // under the selected mask (the Landscape one), People combines as a component
+    h.step();
+    assert_eq!(h.app.session.active_mask, Some(2));
+    crate::panels::masking::start_people(&mut h.app, "subtract");
+    h.step();
+    click(&mut h, "button:maskPeopleGo");
+    let d = develop(&h);
+    assert_eq!(d.masks[1].components.len(), 2);
+    assert_eq!(d.masks[1].components[1].op, lightcraft_develop::MaskOp::Subtract);
+    assert!(matches!(&d.masks[1].components[1].shape, MaskShape::People { parts, .. } if parts == &["entirePerson"]));
+}
+
 fn color_samples(h: &Headless) -> serde_json::Value {
     let d = develop(h);
     let m = d.masks.last().expect("a mask");

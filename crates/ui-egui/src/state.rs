@@ -207,6 +207,13 @@ pub struct UiState {
     /// (`new` mask, or `add`/`subtract`/`intersect` on the selected one) and the text typed.
     #[serde(skip)]
     pub describe: Option<(String, String)>,
+    /// The People part chooser while open: how the selection combines (`new`, `add`,
+    /// `subtract`, `intersect`) and the ids of the parts ticked.
+    #[serde(skip)]
+    pub people: Option<(String, Vec<String>)>,
+    /// The Landscape class chooser while open: how the selection combines.
+    #[serde(skip)]
+    pub landscape: Option<String>,
     /// A SAM 3 download was started from the app (to report its end once).
     #[serde(skip)]
     pub sam_downloading: bool,
@@ -465,6 +472,8 @@ impl Default for UiState {
             focus_keywords: None,
             renaming_mask: None,
             describe: None,
+            people: None,
+            landscape: None,
             detail_due: None,
             sam_downloading: false,
             renaming_component: None,

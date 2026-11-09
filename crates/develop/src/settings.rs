@@ -1089,13 +1089,167 @@ pub enum MaskShape {
         #[serde(default, skip_serializing_if = "is_zero")]
         edge: f64,
     },
+    /// Lightroom-style People mask: the `parts` of the people in the photo (ids of
+    /// [`PersonPart`]; empty means the whole person). `person` is reserved for one person of
+    /// several (0: every person; the model selects every person today). With the SAM 3 model,
+    /// `seg` holds the segmentation it computed for the parts; without it, or before it
+    /// answers, the photo's own person mattes or the subject heuristic stand in.
     People {
         person: u32,
         parts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        /// Edge −100..100, as for `Object` (only with `seg`).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
     },
+    /// Lightroom-style Landscape mask: one `class` of the scene (an id of [`LandscapeClass`]).
+    /// With the SAM 3 model, `seg` holds its segmentation; without it, the Sky class keeps the
+    /// sky heuristic (or the photo's sky matte) and the others select nothing.
     Landscape {
         class: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
     },
+}
+
+/// The parts a People mask can select (Lightroom's set). Stored in
+/// [`MaskShape::People`]`::parts` by [`PersonPart::id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PersonPart {
+    EntirePerson,
+    FaceSkin,
+    BodySkin,
+    Eyebrows,
+    /// Sclera, iris and pupil.
+    Eyes,
+    Lips,
+    Teeth,
+    Hair,
+    FacialHair,
+    Clothes,
+}
+
+impl PersonPart {
+    /// Every part, in the order the panel lists them.
+    pub const ALL: [PersonPart; 10] = [
+        PersonPart::EntirePerson,
+        PersonPart::FaceSkin,
+        PersonPart::BodySkin,
+        PersonPart::Eyebrows,
+        PersonPart::Eyes,
+        PersonPart::Lips,
+        PersonPart::Teeth,
+        PersonPart::Hair,
+        PersonPart::FacialHair,
+        PersonPart::Clothes,
+    ];
+
+    /// The id stored with the mask and given to the commands.
+    pub fn id(self) -> &'static str {
+        match self {
+            PersonPart::EntirePerson => "entirePerson",
+            PersonPart::FaceSkin => "faceSkin",
+            PersonPart::BodySkin => "bodySkin",
+            PersonPart::Eyebrows => "eyebrows",
+            PersonPart::Eyes => "eyes",
+            PersonPart::Lips => "lips",
+            PersonPart::Teeth => "teeth",
+            PersonPart::Hair => "hair",
+            PersonPart::FacialHair => "facialHair",
+            PersonPart::Clothes => "clothes",
+        }
+    }
+
+    /// The name shown in the panel (English source text).
+    pub fn label(self) -> &'static str {
+        match self {
+            PersonPart::EntirePerson => "Entire Person",
+            PersonPart::FaceSkin => "Face Skin",
+            PersonPart::BodySkin => "Body Skin",
+            PersonPart::Eyebrows => "Eyebrows",
+            PersonPart::Eyes => "Eyes",
+            PersonPart::Lips => "Lips",
+            PersonPart::Teeth => "Teeth",
+            PersonPart::Hair => "Hair",
+            PersonPart::FacialHair => "Facial Hair",
+            PersonPart::Clothes => "Clothes",
+        }
+    }
+
+    /// Reads an id or a label, whatever its case, spaces or underscores (`"faceSkin"`,
+    /// `"Face Skin"`, `"face_skin"`); the whole person is also `"person"`.
+    pub fn parse(text: &str) -> Option<PersonPart> {
+        let key: String = text.chars().filter(|c| !c.is_whitespace() && *c != '_' && *c != '-').collect::<String>().to_ascii_lowercase();
+        if key == "person" {
+            return Some(PersonPart::EntirePerson);
+        }
+        PersonPart::ALL.into_iter().find(|p| {
+            p.id().eq_ignore_ascii_case(&key) || p.label().chars().filter(|c| !c.is_whitespace()).collect::<String>().eq_ignore_ascii_case(&key)
+        })
+    }
+}
+
+/// The classes a Landscape mask can select (Lightroom's set). Stored in
+/// [`MaskShape::Landscape`]`::class` by [`LandscapeClass::id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LandscapeClass {
+    Sky,
+    Water,
+    NaturalGround,
+    ArtificialGround,
+    Mountains,
+    Vegetation,
+    Architecture,
+}
+
+impl LandscapeClass {
+    /// Every class, in the order the panel lists them.
+    pub const ALL: [LandscapeClass; 7] = [
+        LandscapeClass::Sky,
+        LandscapeClass::Water,
+        LandscapeClass::NaturalGround,
+        LandscapeClass::ArtificialGround,
+        LandscapeClass::Mountains,
+        LandscapeClass::Vegetation,
+        LandscapeClass::Architecture,
+    ];
+
+    /// The id stored with the mask and given to the commands.
+    pub fn id(self) -> &'static str {
+        match self {
+            LandscapeClass::Sky => "sky",
+            LandscapeClass::Water => "water",
+            LandscapeClass::NaturalGround => "naturalGround",
+            LandscapeClass::ArtificialGround => "artificialGround",
+            LandscapeClass::Mountains => "mountains",
+            LandscapeClass::Vegetation => "vegetation",
+            LandscapeClass::Architecture => "architecture",
+        }
+    }
+
+    /// The name shown in the panel (English source text).
+    pub fn label(self) -> &'static str {
+        match self {
+            LandscapeClass::Sky => "Sky",
+            LandscapeClass::Water => "Water",
+            LandscapeClass::NaturalGround => "Natural Ground",
+            LandscapeClass::ArtificialGround => "Artificial Ground",
+            LandscapeClass::Mountains => "Mountains",
+            LandscapeClass::Vegetation => "Vegetation",
+            LandscapeClass::Architecture => "Architecture",
+        }
+    }
+
+    /// Reads an id or a label, whatever its case, spaces or underscores.
+    pub fn parse(text: &str) -> Option<LandscapeClass> {
+        let key: String = text.chars().filter(|c| !c.is_whitespace() && *c != '_' && *c != '-').collect::<String>().to_ascii_lowercase();
+        LandscapeClass::ALL.into_iter().find(|c| {
+            c.id().eq_ignore_ascii_case(&key) || c.label().chars().filter(|c| !c.is_whitespace()).collect::<String>().eq_ignore_ascii_case(&key)
+        })
+    }
 }
 
 impl MaskShape {
@@ -1114,10 +1268,36 @@ impl MaskShape {
         MaskShape::Background { seg: None, edge: 0.0 }
     }
 
-    /// The stored AI segmentation of a one-click shape (Subject, Sky, Background), if any.
+    /// A People selection of `parts` (every person; the whole person when empty) without an AI
+    /// result yet.
+    pub fn people(parts: &[PersonPart]) -> MaskShape {
+        MaskShape::People { person: 0, parts: parts.iter().map(|p| p.id().to_string()).collect(), seg: None, edge: 0.0 }
+    }
+
+    /// A Landscape selection of `class` without an AI result yet.
+    pub fn landscape(class: LandscapeClass) -> MaskShape {
+        MaskShape::Landscape { class: class.id().to_string(), seg: None, edge: 0.0 }
+    }
+
+    /// The parts of a People shape (the whole person when it names none, or none it knows).
+    pub fn people_parts(parts: &[String]) -> Vec<PersonPart> {
+        let mut out: Vec<PersonPart> = parts.iter().filter_map(|p| PersonPart::parse(p)).collect();
+        out.dedup();
+        if out.is_empty() {
+            out.push(PersonPart::EntirePerson);
+        }
+        out
+    }
+
+    /// The stored AI segmentation of a one-click shape (Subject, Sky, Background, People,
+    /// Landscape), if any.
     pub fn one_click_seg(&self) -> Option<&crate::SegMask> {
         match self {
-            MaskShape::Subject { seg, .. } | MaskShape::Sky { seg, .. } | MaskShape::Background { seg, .. } => seg.as_ref(),
+            MaskShape::Subject { seg, .. }
+            | MaskShape::Sky { seg, .. }
+            | MaskShape::Background { seg, .. }
+            | MaskShape::People { seg, .. }
+            | MaskShape::Landscape { seg, .. } => seg.as_ref(),
             _ => None,
         }
     }

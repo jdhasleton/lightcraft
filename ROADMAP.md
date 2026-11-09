@@ -106,7 +106,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 2. CR3 for every Canon body (25–45 h)
 3. Render-fidelity suite against Lightroom, then tuning (30–60 h)
 4. ~~Full-resolution zoom~~ (done 2026-10-12)
-5. AI masks: Subject / Sky / People (40–70 h + model decision)
+5. AI masks: compare Subject / Sky / People / Landscape with Lightroom, one person of several, model mirror (30–60 h + model decision)
 6. Compressed ORF (support withdrawn; estimate pending provenance review) and HE NEF (20–40 h)
 7. Lens profile database of our own (40–80 h, #329)
 8. Tests in CI on macOS and Windows, and the GPU tests in CI (6–12 h)
@@ -199,6 +199,7 @@ Ranked toward beta; detail in [docs/roadmap.md](docs/roadmap.md), gaps in [docs/
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Priority 5: the People and Landscape mask tiles landed (SAM 3 concept selections of Lightroom's parts and classes); the item now reads the Lightroom comparison, one person of several and the model mirror; headline numbers unchanged |
 | 2026-10-24 | minor | Priority 7 (lens profile database) links its tracking issue #329; headline numbers unchanged |
 | 2026-10-24 | patch | Alpha rationale: tests run in CI on Linux x64 (#2667) and FreeBSD nightly, not on macOS or Windows; ranked item 8 now reads "Tests in CI on macOS and Windows, and the GPU tests in CI"; percentages and hours unchanged |
 | 2026-10-22 | minor | Print: Japanese photo and postcard paper sizes (L判, 2L判, KG判, はがき, 往復はがき, 六切, 四切, 名刺) in the page setup, Print dialog and PDF output; headline numbers unchanged |

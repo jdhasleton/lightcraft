@@ -244,6 +244,58 @@ mod tests {
         assert_eq!(back.one_click_seg(), Some(&seg));
     }
 
+    /// People and Landscape gained room for the model's result too: a library saved before that
+    /// reads unchanged, one saved without a result writes the same bytes as before, and the part
+    /// and class ids read whatever their spelling.
+    #[test]
+    fn people_and_landscape_shapes_read_and_write_as_before() {
+        let old = r#"{"kind":"people","person":0,"parts":["Hair"]}"#;
+        let read: MaskShape = serde_json::from_str(old).unwrap();
+        assert_eq!(read, MaskShape::People { person: 0, parts: vec!["Hair".into()], seg: None, edge: 0.0 });
+        assert_eq!(serde_json::to_string(&read).unwrap(), old);
+        assert!(read.one_click_seg().is_none());
+        let old = r#"{"kind":"landscape","class":"sky"}"#;
+        let read: MaskShape = serde_json::from_str(old).unwrap();
+        assert_eq!(read, MaskShape::landscape(LandscapeClass::Sky));
+        assert_eq!(serde_json::to_string(&read).unwrap(), old);
+        let seg = SegMask::from_logits(2, &[4.0, -4.0, 4.0, -4.0]);
+        let with = MaskShape::People { person: 0, parts: vec!["hair".into(), "lips".into()], seg: Some(seg.clone()), edge: -10.0 };
+        let back: MaskShape = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
+        assert_eq!(back.one_click_seg(), Some(&seg));
+        let with = MaskShape::Landscape { class: "water".into(), seg: Some(seg.clone()), edge: 30.0 };
+        let back: MaskShape = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
+        // ids and labels, in any spelling; the whole person when none is known
+        for (text, part) in [
+            ("faceSkin", PersonPart::FaceSkin),
+            ("Face Skin", PersonPart::FaceSkin),
+            ("face_skin", PersonPart::FaceSkin),
+            ("person", PersonPart::EntirePerson),
+            ("HAIR", PersonPart::Hair),
+        ] {
+            assert_eq!(PersonPart::parse(text), Some(part), "{text}");
+        }
+        assert_eq!(PersonPart::parse("glasses"), None);
+        assert_eq!(MaskShape::people_parts(&["lips".into(), "nose".into(), "Lips".into()]), vec![PersonPart::Lips]);
+        assert_eq!(MaskShape::people_parts(&[]), vec![PersonPart::EntirePerson]);
+        assert_eq!(MaskShape::people_parts(&["nose".into()]), vec![PersonPart::EntirePerson]);
+        for (text, class) in
+            [("naturalGround", LandscapeClass::NaturalGround), ("Natural ground", LandscapeClass::NaturalGround), ("SKY", LandscapeClass::Sky)]
+        {
+            assert_eq!(LandscapeClass::parse(text), Some(class), "{text}");
+        }
+        assert_eq!(LandscapeClass::parse("sea"), None);
+        for p in PersonPart::ALL {
+            assert_eq!(PersonPart::parse(p.id()), Some(p));
+            assert_eq!(PersonPart::parse(p.label()), Some(p));
+        }
+        for c in LandscapeClass::ALL {
+            assert_eq!(LandscapeClass::parse(c.id()), Some(c));
+            assert_eq!(LandscapeClass::parse(c.label()), Some(c));
+        }
+    }
+
     /// Remove Hot Pixels (#1345) is on for a newly imported raw and off for everything else, and an edit saved
     /// before the box existed reads as off, so it renders as it did.
     #[test]

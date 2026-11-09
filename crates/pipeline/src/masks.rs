@@ -3,10 +3,11 @@
 //! Shapes are defined in normalized oriented-image coordinates; sizes are in "long-edge units".
 //! Components combine with Add (max), Subtract (a·(1−c)) and Intersect (a·c).
 //!
-//! AI shapes (Sky, Subject, Background, People) use the segmentation [`Mattes`] the source carries
-//! (DNG semantic masks, e.g. iPhone ProRAW's) when it has a matching one, else a heuristic.
+//! AI shapes (Sky, Subject, Background, People, Landscape's Sky) use the segmentation [`Mattes`]
+//! the source carries (DNG semantic masks, e.g. iPhone ProRAW's) when it has a matching one, else
+//! the model's stored result, else a heuristic.
 
-use lightcraft_develop::{BrushStroke, LocalAdjustments, Mask, MaskOp, MaskShape, SegMask};
+use lightcraft_develop::{BrushStroke, LandscapeClass, LocalAdjustments, Mask, MaskOp, MaskShape, PersonPart, SegMask};
 use lightcraft_geom::{Orientation, Point};
 use lightcraft_raster::{Image, Plane, Rgb32f};
 
@@ -105,21 +106,25 @@ impl Mattes {
             MaskShape::Sky { .. } => self.of(&[Sky]),
             MaskShape::Subject { .. } => person(),
             MaskShape::People { parts, .. } => {
+                let whole = parts.is_empty() || parts.iter().any(|p| PersonPart::parse(p) == Some(PersonPart::EntirePerson));
+                if whole {
+                    return person();
+                }
                 let wanted: Vec<MatteKind> = parts
                     .iter()
-                    .filter_map(|p| {
-                        let p = p.to_ascii_lowercase();
-                        [("skin", Skin), ("hair", Hair), ("teeth", Teeth), ("glasses", Glasses)]
-                            .into_iter()
-                            .find(|(n, _)| p.contains(n))
-                            .map(|(_, k)| k)
+                    .filter_map(|p| match PersonPart::parse(p) {
+                        Some(PersonPart::FaceSkin | PersonPart::BodySkin) => Some(Skin),
+                        Some(PersonPart::Hair) => Some(Hair),
+                        Some(PersonPart::Teeth) => Some(Teeth),
+                        // (an older free-text part)
+                        None if p.to_ascii_lowercase().contains("glasses") => Some(Glasses),
+                        _ => None,
                     })
                     .collect();
-                let whole =
-                    parts.is_empty() || parts.iter().any(|p| matches!(p.to_ascii_lowercase().as_str(), "person" | "entire person" | "entireperson"));
-                // parts without a matte (lips, clothes, …) keep the heuristic
-                if whole { person() } else { self.of(&wanted) }
+                // parts without a matte (lips, eyes, clothes, …) keep the model's result or the heuristic
+                self.of(&wanted)
             }
+            MaskShape::Landscape { class, .. } if LandscapeClass::parse(class) == Some(LandscapeClass::Sky) => self.of(&[Sky]),
             _ => Vec::new(),
         }
     }
@@ -265,9 +270,13 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
                 *v = 1.0 - smooth(tol * 0.5, tol, d);
             }
         }
-        // one-click shapes with the model's result: Subject and Sky sample it; Background is the
-        // subject's segmentation inverted, so the two always agree (no overlap, no gap)
-        MaskShape::Sky { seg: Some(seg), edge } | MaskShape::Subject { seg: Some(seg), edge } => {
+        // one-click shapes with the model's result: Subject, Sky, People and Landscape sample it;
+        // Background is the subject's segmentation inverted, so the two always agree (no overlap,
+        // no gap)
+        MaskShape::Sky { seg: Some(seg), edge }
+        | MaskShape::Subject { seg: Some(seg), edge }
+        | MaskShape::People { seg: Some(seg), edge, .. }
+        | MaskShape::Landscape { seg: Some(seg), edge, .. } => {
             ai_alpha(Some(seg), &[], *edge, frame, (w, h), log_l, &mut out);
         }
         MaskShape::Background { seg: Some(seg), edge } => {
@@ -312,6 +321,11 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
             let mut s = shape_alpha(&MaskShape::subject(), frame, w, h, img, log_l, ev, mattes);
             s.data.iter_mut().for_each(|v| *v = 1.0 - *v);
             out = s;
+        }
+        // the Sky class without the model's result keeps the sky heuristic; the other classes
+        // (water, ground, mountains, vegetation, architecture) have none and select nothing
+        MaskShape::Landscape { class, .. } if LandscapeClass::parse(class) == Some(LandscapeClass::Sky) => {
+            out = shape_alpha(&MaskShape::sky(), frame, w, h, img, log_l, ev, mattes);
         }
         MaskShape::DepthRange { .. } | MaskShape::Landscape { .. } => {}
     }

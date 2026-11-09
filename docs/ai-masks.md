@@ -56,10 +56,11 @@ The result is stored with the mask: the model's 288 × 288 mask logits over the 
 need the model, so masks survive moving the library to a machine without it, and the web build
 renders them. Editing the photo's look later does not recompute a mask (click again to update).
 
-## One-click masks: Subject, Sky, Background
+## One-click masks: Subject, Sky, Background, People, Landscape
 
 With the model installed, the **Subject**, **Sky** and **Background** tiles use it too, with no
-click or text needed:
+click or text needed, and the **People** and **Landscape** tiles offer Lightroom's parts and
+classes:
 
 - **Sky** asks the model for `sky`.
 - **Subject** asks for `person` and takes every person it finds; with none, `animal`, then
@@ -73,15 +74,42 @@ click or text needed:
   matches `person` but is not what the photo is of, so those photos move on to the next concept.
 - **Background** is the exact inverse of what Subject would select (computed as the subject,
   inverted when rendered), so the two never overlap or leave a gap.
+- **People** opens a list of the parts Lightroom offers: Entire Person, Face Skin, Body Skin,
+  Eyebrows, Eyes, Lips, Teeth, Hair, Facial Hair and Clothes. Tick what you want and press
+  Select: the parts become one selection of *every* person in the photo (there is no choice of
+  one person yet). Each part is a concept the model is asked for, chosen by trying phrases on
+  real photos: `person`; `face` less `eyes`, `eyebrows`, `lips`, `teeth` and `beard` (Face Skin:
+  the model's `face` is the face without the hair, features included); `skin` less `face` (Body
+  Skin: `skin` is every bit of skin, so taking the face out leaves the neck, arms, hands and
+  chest); `eyebrows`; `eyes`; `lips`; `teeth`; `hair` less `beard`; `beard` and `moustache`
+  (Facial Hair: the model finds nothing for `facial hair`); `clothes`. "Less" means the excluded
+  concept's mask is cut out of the part's wherever the model is sure of it. A few parts take a
+  few seconds (Face Skin asks six questions, about a third of a second each).
+- **Landscape** offers Lightroom's classes, one click each: Sky (`sky`), Water (`water`), Natural
+  Ground (`natural ground`, `grass`, `soil`, `sand`), Artificial Ground (`road`, `pavement`),
+  Mountains (`mountains`), Vegetation (`vegetation`, `trees`, `grass`) and Architecture
+  (`buildings`). A comma list is tried phrase by phrase and united: `ground` alone was whatever
+  the ground was made of (a driveway as readily as a meadow), `vegetation` took a whole forested
+  slope where `trees` took only the trees in front. The model now and then answers a class that
+  is not in the photo (a hazy horizon as `water`): look at the overlay, and use Describe when you
+  want an exact word.
+- **+ ▸ People… / Landscape…** and **− ▸ …** under the selected mask add or take away further
+  parts and classes as components, like Describe: People (Face Skin), then − ▸ People… (Lips);
+  Landscape (Vegetation), then + ▸ Landscape… (Natural Ground).
 
 The result is stored with the mask like an Object or Describe selection: renders and exports
 never need the model, and the **Edge** slider applies. The mask appears when the model answers
 (under a second, after the photo's one-time analysis), with "Selecting…" under the tiles
-meanwhile; when the model finds nothing ("No sky was found in this photo.") no mask is made.
-Without the model the tiles work as before: a classical heuristic (bright, smooth, bluish areas
-touching the top for Sky; centre-weighted contrast for Subject), and no download offer. A photo
-that carries its own mattes (iPhone ProRAW sky and person mattes) uses them in both cases. The
-one-click masks have no zoomed-in detail pass yet.
+meanwhile; when the model finds nothing ("No sky was found in this photo.", "No lips were found
+on the people in this photo.") no mask is made.
+Without the model, Subject, Sky and Background work as before: a classical heuristic (bright,
+smooth, bluish areas touching the top for Sky; centre-weighted contrast for Subject), and no
+download offer. People and Landscape are the model's: their tiles offer the download instead,
+while the commands (CLI, MCP) fall back like the others, People to the subject heuristic and
+Landscape's Sky to the sky heuristic (its other classes select nothing). A photo that carries its
+own mattes (iPhone ProRAW sky and person mattes: person, skin, hair, teeth) uses them in every
+case, for Sky, Subject, Background, People and Landscape's Sky. The one-click masks have no
+zoomed-in detail pass yet.
 
 ## Remote Metal inference
 
@@ -226,7 +254,9 @@ Therefore:
 | `mask.add` | `{kind: "object", points?: [[x,y],…], exclude?: [[x,y],…], seg?}` | an Object mask (empty until clicked) |
 | `mask.add` | `{kind: "prompt", text, seg?}` | a Describe mask |
 | `mask.add` | `{kind: "sky" \| "subject" \| "background", seg?}` | a one-click mask: the model's selection when it is installed (in the app `{pending: true}`, the mask appears when found), else the heuristic |
-| `mask.addComponent` | `{op: add\|subtract\|intersect, kind: "object"\|"prompt", …}` | the same as a component |
+| `mask.add` | `{kind: "people", parts?: ["entirePerson" \| "faceSkin" \| "bodySkin" \| "eyebrows" \| "eyes" \| "lips" \| "teeth" \| "hair" \| "facialHair" \| "clothes", …], seg?}` | a People mask of those parts (the whole person without `parts`; names such as `"Face Skin"` are read too), as above |
+| `mask.add` | `{kind: "landscape", class: "sky" \| "water" \| "naturalGround" \| "artificialGround" \| "mountains" \| "vegetation" \| "architecture", seg?}` | a Landscape mask of that class, as above |
+| `mask.addComponent` | `{op: add\|subtract\|intersect, kind: "object"\|"prompt"\|"people"\|"landscape"\|…, …}` | the same as a component |
 | `mask.objectPoint` | `{x, y, exclude?: bool, id?}` | one click on the selected mask's Object selection (≤ 64 clicks) |
 | `mask.refineDetail` | `{id?, component?}` | the zoomed-in detail pass → `{started}` |
 | `segment.prepare` | `{}` | load the model and analyze the active photo → `{busy}` |

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use lightcraft_develop::MaskShape;
+
 use crate::Session;
 use crate::segment::{NOT_INSTALLED, Segmenter};
 
@@ -42,24 +44,46 @@ fn settle(s: &mut Session, limit: Duration) -> Vec<String> {
     }
 }
 
-/// Sky, Subject and Background without the model: their heuristic mask at once, no error and
-/// nothing pending (so no download offer); a stored result is kept as it is.
+/// Sky, Subject, Background, People and Landscape without the model: their heuristic mask at
+/// once, no error and nothing pending (so no download offer); a stored result is kept as it is.
 #[test]
 fn one_click_masks_without_the_model_keep_their_heuristic() {
     let mut s = Session::with_demo();
     let id = s.active().unwrap();
-    for kind in ["sky", "subject", "background"] {
-        let r = s.execute("mask.add", &json!({"kind": kind})).unwrap();
-        assert!(r.get("pending").is_none(), "{kind}: {r}");
+    for p in [
+        json!({"kind": "sky"}),
+        json!({"kind": "subject"}),
+        json!({"kind": "background"}),
+        json!({"kind": "people", "parts": ["Hair", "faceSkin", "hair"]}),
+        json!({"kind": "landscape", "class": "Natural Ground"}),
+    ] {
+        let r = s.execute("mask.add", &p).unwrap();
+        assert!(r.get("pending").is_none(), "{p}: {r}");
     }
     let d = s.develop_of(id).unwrap();
-    assert_eq!(d.masks.len(), 3);
+    assert_eq!(d.masks.len(), 5);
     assert!(d.masks.iter().all(|m| m.components[0].shape.one_click_seg().is_none()));
+    // parts and classes are stored as their ids, once each
+    assert!(matches!(&d.masks[3].components[0].shape, MaskShape::People { person: 0, parts, .. } if parts == &["hair", "faceSkin"]));
+    assert!(matches!(&d.masks[4].components[0].shape, MaskShape::Landscape { class, .. } if class == "naturalGround"));
     assert!(!s.segmenter.busy());
     let seg = lightcraft_develop::SegMask::from_logits(4, &[5.0; 16]);
     s.execute("mask.add", &json!({"kind": "background", "seg": serde_json::to_value(&seg).unwrap()})).unwrap();
+    s.execute("mask.add", &json!({"kind": "people", "seg": serde_json::to_value(&seg).unwrap()})).unwrap();
     let d = s.develop_of(id).unwrap();
-    assert_eq!(d.masks[3].components[0].shape.one_click_seg(), Some(&seg));
+    assert_eq!(d.masks[5].components[0].shape.one_click_seg(), Some(&seg));
+    assert!(
+        matches!(&d.masks[6].components[0].shape, MaskShape::People { parts, seg: Some(_), .. } if parts == &["entirePerson"]),
+        "no parts: the whole person"
+    );
+    // a part or class this build doesn't know is refused, naming the known ones
+    let e = s.execute("mask.add", &json!({"kind": "people", "parts": ["nose"]})).unwrap_err().to_string();
+    assert!(e.contains("nose") && e.contains("faceSkin"), "{e}");
+    let e = s.execute("mask.add", &json!({"kind": "landscape", "class": "sea"})).unwrap_err().to_string();
+    assert!(e.contains("sea") && e.contains("naturalGround"), "{e}");
+    let e = s.execute("mask.add", &json!({"kind": "landscape"})).unwrap_err().to_string();
+    assert!(e.contains("class"), "{e}");
+    assert_eq!(s.develop_of(id).unwrap().masks.len(), 7);
 }
 
 #[test]

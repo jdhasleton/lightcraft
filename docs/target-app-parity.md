@@ -93,7 +93,7 @@ search embeddings; generative remove runs in Adobe's cloud.
 | 2026-10-12 | minor | Mamiya MEF decoded (raw-parity.md): 241 verified, 35 unsupported; rounded numbers unchanged |
 | 2026-10-12 | minor | Epson ERF decoded (raw-parity.md): 240 models verified, 229 preview-only; shares and rounded numbers unchanged |
 | Subject / Sky / Background masks | SAM 3 selections when the model is installed (people / animals / buildings / vehicles, else the most prominent object; `sky`; the subject's inverse); classical heuristics without it; the file's own DNG semantic mattes | 🟡 |
-| People (faces, body, hair, skin…) and Landscape masks | — | ⬜ |
+| People (faces, body, hair, skin…) and Landscape masks | SAM 3 concept selections when the model is installed (Lightroom's ten people parts and seven landscape classes, stored with the mask); the photo's own mattes or heuristics without it; every person at once | 🟡 |
 | Object / Describe masks | SAM 3 in pure Rust (Metal / CPU); opt-in 3.4 GB download, no mirror configured | 🟡 |
 | Depth range mask, Lens Blur | — | ⬜ |
 | AI Denoise | Bayer only, built-in classical denoiser out of the box, optional user-installed weights, pure-Rust CPU / GPU | 🟡 |
@@ -299,6 +299,7 @@ P2 items 12–25 h; look tuning, performance, packaging, hardening 25–45 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | AI: People and Landscape masks ⬜ → 🟡 (SAM 3 concept selections of Lightroom's parts and classes when the model is installed, the photo's mattes or heuristics without it); headline numbers unchanged |
 | 2026-11-07 | correction | Compressed ORF sensor support withdrawn pending provenance review; embedded preview fallback remains. Coverage regenerated without the removed decoder: 557 verified, 665 unverified, 187 preview-only, 37 unsupported; 94% use-weighted coverage. |
 | 2026-11-04 | minor | Compressed ORF support was introduced in #3775; subsequently withdrawn pending provenance review. Earlier clean-room and verification claims are withdrawn; compressed files use embedded previews when available. See [ORF status](orf-compression.md). |
 | 2026-10-24 | patch | Stability, the stability discount, the Beta-needs list and the estimate history: tests run in CI on Linux x64 since #2667 (FreeBSD nightly), not on macOS or Windows (gap 9); percentages and hours unchanged |

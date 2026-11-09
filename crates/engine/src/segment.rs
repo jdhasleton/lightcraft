@@ -23,7 +23,7 @@ mod worker;
 use std::path::PathBuf;
 
 use lightcraft_catalog::PhotoId;
-use lightcraft_develop::{MaskShape, SegMask};
+use lightcraft_develop::{LandscapeClass, MaskShape, PersonPart, SegMask};
 use lightcraft_geom::Point;
 
 use crate::Session;
@@ -45,48 +45,122 @@ pub const MAX_CLICKS: usize = 64;
 /// What the Sky tile asks the model for.
 pub const SKY_CONCEPT: &str = "sky";
 
-/// The one-click selections the model computes (Subject, Sky, Background tiles). Background
-/// is computed as the subject and inverted when rendered, so the two always agree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the model is asked for a People part: the phrases whose instances make the part, less
+/// the phrases taken out of it (each phrase is one concept prompt; within a phrase a comma lists
+/// alternatives that merge). Chosen on real photos: `face` is the face without the hair and
+/// with its features, so Face Skin takes the eyes, eyebrows, lips, teeth and beard back out;
+/// `skin` is every bit of skin, so Body Skin is that less the face; `hair` is the hair on the
+/// head; `facial hair` finds nothing where `beard` does.
+pub fn person_part_concepts(part: PersonPart) -> (&'static [&'static str], &'static [&'static str]) {
+    match part {
+        PersonPart::EntirePerson => (&["person"], &[]),
+        PersonPart::FaceSkin => (&["face"], &["eyes", "eyebrows", "lips", "teeth", "beard"]),
+        PersonPart::BodySkin => (&["skin"], &["face"]),
+        PersonPart::Eyebrows => (&["eyebrows"], &[]),
+        PersonPart::Eyes => (&["eyes"], &[]),
+        PersonPart::Lips => (&["lips"], &[]),
+        PersonPart::Teeth => (&["teeth"], &[]),
+        PersonPart::Hair => (&["hair"], &["beard"]),
+        PersonPart::FacialHair => (&["beard", "moustache"], &[]),
+        PersonPart::Clothes => (&["clothes"], &[]),
+    }
+}
+
+/// What the model is asked for a Landscape class ([`person_part_concepts`] says how). Chosen
+/// on real photos: `ground` alone is whatever the ground is made of (a driveway as readily as
+/// a meadow), so the two ground classes name their materials; `vegetation` takes a whole
+/// forested slope where `trees` takes only the trees in front, so Vegetation asks for both and
+/// for grass.
+pub fn landscape_concepts(class: LandscapeClass) -> (&'static [&'static str], &'static [&'static str]) {
+    match class {
+        LandscapeClass::Sky => (&[SKY_CONCEPT], &[]),
+        LandscapeClass::Water => (&["water"], &[]),
+        LandscapeClass::NaturalGround => (&["natural ground", "grass", "soil", "sand"], &[]),
+        LandscapeClass::ArtificialGround => (&["road", "pavement"], &[]),
+        LandscapeClass::Mountains => (&["mountains"], &[]),
+        LandscapeClass::Vegetation => (&["vegetation", "trees", "grass"], &[]),
+        LandscapeClass::Architecture => (&["buildings"], &[]),
+    }
+}
+
+/// The one-click selections the model computes (Subject, Sky, Background, People and
+/// Landscape tiles). Background is computed as the subject and inverted when rendered, so the
+/// two always agree.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AutoKind {
     Subject,
     Sky,
     Background,
+    /// The parts picked (never empty: the whole person when none was).
+    People(Vec<PersonPart>),
+    Landscape(LandscapeClass),
 }
 
 impl AutoKind {
-    /// The one-click kind of `shape`, if it is one.
+    /// The one-click kind of `shape`, if it is one (a Landscape class this build doesn't know
+    /// is none).
     pub fn of(shape: &MaskShape) -> Option<AutoKind> {
         match shape {
             MaskShape::Subject { .. } => Some(AutoKind::Subject),
             MaskShape::Sky { .. } => Some(AutoKind::Sky),
             MaskShape::Background { .. } => Some(AutoKind::Background),
+            MaskShape::People { parts, .. } => Some(AutoKind::People(MaskShape::people_parts(parts))),
+            MaskShape::Landscape { class, .. } => LandscapeClass::parse(class).map(AutoKind::Landscape),
             _ => None,
         }
     }
 
     /// The `kind` the mask commands know it by.
-    pub fn kind(self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             AutoKind::Subject => "subject",
             AutoKind::Sky => "sky",
             AutoKind::Background => "background",
+            AutoKind::People(_) => "people",
+            AutoKind::Landscape(_) => "landscape",
         }
     }
 
+    /// The `mask.add` / `mask.addComponent` parameters that make this shape (without its `seg`).
+    pub fn params(&self) -> serde_json::Value {
+        let mut p = serde_json::json!({"kind": self.kind()});
+        match self {
+            AutoKind::People(parts) => p["parts"] = serde_json::json!(parts.iter().map(|x| x.id()).collect::<Vec<_>>()),
+            AutoKind::Landscape(class) => p["class"] = serde_json::json!(class.id()),
+            _ => {}
+        }
+        p
+    }
+
     /// What to tell the user when the model found nothing.
-    pub fn nothing_found(self) -> String {
+    pub fn nothing_found(&self) -> String {
         match self {
             AutoKind::Sky => "No sky was found in this photo.".into(),
             AutoKind::Subject | AutoKind::Background => "No subject was found in this photo.".into(),
+            AutoKind::People(parts) => match parts.as_slice() {
+                [PersonPart::EntirePerson] => "No people were found in this photo.".into(),
+                [part] => {
+                    let plural = matches!(part, PersonPart::Eyebrows | PersonPart::Eyes | PersonPart::Lips | PersonPart::Teeth | PersonPart::Clothes);
+                    format!("No {} {} found on the people in this photo.", part.label().to_ascii_lowercase(), if plural { "were" } else { "was" })
+                }
+                _ => "None of the chosen parts were found on the people in this photo.".into(),
+            },
+            AutoKind::Landscape(LandscapeClass::Mountains) => "No mountains were found in this photo.".into(),
+            AutoKind::Landscape(class) => format!("No {} was found in this photo.", class.label().to_ascii_lowercase()),
         }
     }
 
     #[cfg(feature = "sam")]
-    fn job(self) -> worker::Kind {
+    fn job(&self) -> worker::Kind {
+        let concept = |(include, exclude): (&[&str], &[&str])| worker::Concept {
+            include: include.iter().map(|s| s.to_string()).collect(),
+            exclude: exclude.iter().map(|s| s.to_string()).collect(),
+        };
         match self {
             AutoKind::Sky => worker::Kind::Text(SKY_CONCEPT.into()),
             AutoKind::Subject | AutoKind::Background => worker::Kind::Subject,
+            AutoKind::People(parts) => worker::Kind::Concepts(parts.iter().map(|p| concept(person_part_concepts(*p))).collect()),
+            AutoKind::Landscape(class) => worker::Kind::Concepts(vec![concept(landscape_concepts(*class))]),
         }
     }
 }
@@ -622,8 +696,8 @@ impl Session {
 
     /// The model's result for a one-click shape on photo `id`, waiting for the model: `None`
     /// when it found nothing (no sky; for Subject and Background, nothing nameable and no
-    /// prominent point either).
-    pub fn segment_auto(&mut self, id: PhotoId, kind: AutoKind) -> Result<Option<SegMask>, String> {
+    /// prominent point either; for People and Landscape, none of the parts or the class).
+    pub fn segment_auto(&mut self, id: PhotoId, kind: &AutoKind) -> Result<Option<SegMask>, String> {
         self.segmenter.model_dir()?;
         #[cfg(feature = "sam")]
         {
@@ -649,8 +723,9 @@ impl Session {
         self.segmenter.model_dir()?;
         #[cfg(feature = "sam")]
         {
+            let job = kind.job();
             let tag = Tag::NewAuto { photo: id, mask, op: op.to_string(), name, kind };
-            self.segment_queue(id, kind.job(), tag, None)
+            self.segment_queue(id, job, tag, None)
         }
         #[cfg(not(feature = "sam"))]
         {
@@ -805,7 +880,8 @@ impl Session {
                     return polled.messages.push("The photo changed before the selection was found; try again.".into());
                 }
                 let Ok(seg) = serde_json::to_value(seg) else { return };
-                let mut p = serde_json::json!({"kind": kind.kind(), "seg": seg});
+                let mut p = kind.params();
+                p["seg"] = seg;
                 if let Some(n) = name {
                     p["name"] = serde_json::json!(n);
                 }
@@ -902,6 +978,62 @@ mod tests {
         assert_eq!(d.masks[0].components.len(), 2);
         assert_eq!(d.masks[0].components[1].op, lightcraft_develop::MaskOp::Subtract);
         assert!(matches!(&d.masks[0].components[1].shape, MaskShape::Sky { seg: Some(_), .. }));
+        // People keeps the parts it was asked for (as ids), Landscape its class
+        let parts = vec![PersonPart::Hair, PersonPart::Lips];
+        s.segmenter.results.0.send(outcome(AutoKind::People(parts.clone()), None, "add", Ok(Some(seg.clone())))).unwrap();
+        let polled = s.segment_poll();
+        assert!(polled.changed && polled.messages.is_empty(), "{:?}", polled.messages);
+        let d = s.develop_of(id).unwrap();
+        assert_eq!(d.masks.len(), 3);
+        let MaskShape::People { person, parts: stored, seg: Some(x), edge } = &d.masks[2].components[0].shape else { panic!("{:?}", d.masks[2]) };
+        assert_eq!((*person, stored.as_slice(), x, *edge), (0, &["hair".to_string(), "lips".to_string()][..], &seg, 0.0));
+        assert_eq!(AutoKind::of(&d.masks[2].components[0].shape), Some(AutoKind::People(parts)));
+        s.segmenter.results.0.send(outcome(AutoKind::Landscape(LandscapeClass::Water), Some(3), "intersect", Ok(Some(seg.clone())))).unwrap();
+        s.segment_poll();
+        let d = s.develop_of(id).unwrap();
+        assert_eq!(d.masks[2].components[1].op, lightcraft_develop::MaskOp::Intersect);
+        assert!(matches!(&d.masks[2].components[1].shape, MaskShape::Landscape { class, seg: Some(x), .. } if class == "water" && *x == seg));
+        s.segmenter.results.0.send(outcome(AutoKind::Landscape(LandscapeClass::Mountains), None, "add", Ok(None))).unwrap();
+        let polled = s.segment_poll();
+        assert_eq!(polled.messages, vec!["No mountains were found in this photo.".to_string()]);
+        s.segmenter.results.0.send(outcome(AutoKind::People(vec![PersonPart::FaceSkin]), None, "add", Ok(None))).unwrap();
+        assert_eq!(s.segment_poll().messages, vec!["No face skin was found on the people in this photo.".to_string()]);
+        assert_eq!(s.develop_of(id).unwrap().masks.len(), 3);
+    }
+
+    /// Every part and class asks the model for at least one phrase, and the parameters the
+    /// finished selection is created with name the same part and class ids the shape stores.
+    #[test]
+    fn people_parts_and_landscape_classes_name_their_concepts() {
+        for p in PersonPart::ALL {
+            let (include, exclude) = person_part_concepts(p);
+            assert!(!include.is_empty() && include.iter().chain(exclude).all(|s| !s.trim().is_empty()), "{p:?}");
+        }
+        for c in LandscapeClass::ALL {
+            let (include, _) = landscape_concepts(c);
+            assert!(!include.is_empty(), "{c:?}");
+        }
+        assert_eq!(landscape_concepts(LandscapeClass::Sky).0, &[SKY_CONCEPT], "the Landscape Sky class is the Sky tile's selection");
+        let kind = AutoKind::People(vec![PersonPart::FaceSkin, PersonPart::Clothes]);
+        assert_eq!(kind.params(), serde_json::json!({"kind": "people", "parts": ["faceSkin", "clothes"]}));
+        assert_eq!(AutoKind::Landscape(LandscapeClass::NaturalGround).params(), serde_json::json!({"kind": "landscape", "class": "naturalGround"}));
+        assert_eq!(AutoKind::Sky.params(), serde_json::json!({"kind": "sky"}));
+        assert_eq!(
+            AutoKind::of(&MaskShape::People { person: 0, parts: vec![], seg: None, edge: 0.0 }),
+            Some(AutoKind::People(vec![PersonPart::EntirePerson]))
+        );
+        assert_eq!(
+            AutoKind::of(&MaskShape::Landscape { class: "sea".into(), seg: None, edge: 0.0 }),
+            None,
+            "an unknown class is not sent to the model"
+        );
+        assert_eq!(AutoKind::People(vec![PersonPart::EntirePerson]).nothing_found(), "No people were found in this photo.");
+        assert_eq!(AutoKind::People(vec![PersonPart::Lips]).nothing_found(), "No lips were found on the people in this photo.");
+        assert_eq!(
+            AutoKind::People(vec![PersonPart::Hair, PersonPart::Lips]).nothing_found(),
+            "None of the chosen parts were found on the people in this photo."
+        );
+        assert_eq!(AutoKind::Landscape(LandscapeClass::ArtificialGround).nothing_found(), "No artificial ground was found in this photo.");
     }
 
     fn seg_box(side: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> SegMask {

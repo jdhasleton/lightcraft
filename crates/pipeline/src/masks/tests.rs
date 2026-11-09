@@ -624,10 +624,60 @@ fn people_and_subject_use_person_mattes() {
     assert!(subject.get(10, 50) > 0.99 && subject.get(190, 50) > 0.99 && subject.get(100, 50) < 0.01);
     let background = eval(&MaskShape::background());
     assert!(background.get(100, 50) > 0.99 && background.get(10, 50) < 0.01);
-    let hair = eval(&MaskShape::People { person: 0, parts: vec!["Hair".into()] });
+    let hair = eval(&MaskShape::People { person: 0, parts: vec!["Hair".into()], seg: None, edge: 0.0 });
     assert!(hair.get(190, 50) > 0.99 && hair.get(10, 50) < 0.01);
-    let lips = MaskShape::People { person: 0, parts: vec!["Lips".into()] };
+    // the panel's ids: face and body skin take the skin matte; facial hair is not the hair matte
+    let face = eval(&MaskShape::people(&[PersonPart::FaceSkin]));
+    assert!(face.get(10, 50) > 0.99 && face.get(190, 50) < 0.01);
+    assert_eq!(eval(&MaskShape::people(&[PersonPart::BodySkin])), face);
+    let beard = MaskShape::people(&[PersonPart::FacialHair]);
+    assert_eq!(eval(&beard), shape_alpha(&beard, &f, w, h, &img, &l, 0.0, None));
+    let lips = MaskShape::People { person: 0, parts: vec!["Lips".into()], seg: None, edge: 0.0 };
     assert_eq!(eval(&lips), shape_alpha(&lips, &f, w, h, &img, &l, 0.0, None));
+    // the whole person (empty, or the Entire Person part) is the union of the parts
+    assert_eq!(eval(&MaskShape::people(&[PersonPart::EntirePerson, PersonPart::Lips])), subject);
+    assert_eq!(eval(&MaskShape::People { person: 0, parts: vec![], seg: None, edge: 0.0 }), subject);
+}
+
+/// People and Landscape follow the model's stored result like Subject does (Edge applies);
+/// without one, People keeps the subject heuristic, Landscape's Sky class the sky heuristic (or
+/// the photo's sky matte), and the other classes select nothing.
+#[test]
+fn people_and_landscape_follow_their_stored_segmentation() {
+    let (w, h) = (200, 100);
+    let img = Rgb32f::filled(w, h, [0.5, 0.7, 1.4]);
+    let l = img.map(crate::local::log_lum);
+    let f = frame(w, h);
+    let side = 16;
+    let logits: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 8.0 } else { -8.0 }).collect();
+    let seg = SegMask::from_logits(side, &logits);
+    let eval = |shape: &MaskShape| shape_alpha(shape, &f, w, h, &img, &l, 0.0, None);
+    let subject = eval(&MaskShape::Subject { seg: Some(seg.clone()), edge: 0.0 });
+    let people = eval(&MaskShape::People { person: 0, parts: vec!["hair".into(), "lips".into()], seg: Some(seg.clone()), edge: 0.0 });
+    assert_eq!(people, subject);
+    assert!(people.get(20, 50) > 0.99 && people.get(180, 50) < 0.01, "{} {}", people.get(20, 50), people.get(180, 50));
+    let water = eval(&MaskShape::Landscape { class: "water".into(), seg: Some(seg.clone()), edge: 0.0 });
+    assert_eq!(water, subject);
+    let soft = eval(&MaskShape::Landscape { class: "water".into(), seg: Some(seg.clone()), edge: 100.0 });
+    assert!(soft.get(100, 50) > 0.2 && soft.get(100, 50) < 0.8 && soft.get(20, 50) > 0.99, "{} {}", soft.get(100, 50), soft.get(20, 50));
+    assert_ne!(soft, water, "Edge applies");
+    // without a result
+    assert_eq!(eval(&MaskShape::people(&[PersonPart::Hair])), eval(&MaskShape::subject()));
+    assert_eq!(eval(&MaskShape::landscape(LandscapeClass::Sky)), eval(&MaskShape::sky()));
+    assert!(eval(&MaskShape::landscape(LandscapeClass::Sky)).get(150, 5) > 0.9, "the sky heuristic sees this bright blue top");
+    for class in [LandscapeClass::Water, LandscapeClass::NaturalGround, LandscapeClass::Mountains, LandscapeClass::Architecture] {
+        assert!(eval(&MaskShape::landscape(class)).data.iter().all(|v| *v == 0.0), "{class:?} has no heuristic");
+    }
+    // the photo's own sky matte serves the Sky class as it serves the Sky tile
+    let mut mattes = Mattes::default();
+    mattes.push(MatteKind::Sky, left_matte(w, h, 0.5));
+    let matte = shape_alpha(&MaskShape::landscape(LandscapeClass::Sky), &f, w, h, &img, &l, 0.0, Some(&mattes));
+    assert_eq!(matte, shape_alpha(&MaskShape::sky(), &f, w, h, &img, &l, 0.0, Some(&mattes)));
+    assert!(matte.get(25, 90) > 0.99 && matte.get(150, 5) < 0.01);
+    assert_eq!(
+        shape_alpha(&MaskShape::landscape(LandscapeClass::Water), &f, w, h, &img, &l, 0.0, Some(&mattes)),
+        eval(&MaskShape::landscape(LandscapeClass::Water))
+    );
 }
 
 /// With the model's result stored, Subject and Sky follow it and Background is its exact

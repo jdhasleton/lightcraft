@@ -1,7 +1,8 @@
 //! Masking and Remove (spot) commands on the active photo.
 
 use lightcraft_develop::{
-    BrushStroke, LocalAdjustments, MAX_COLOR_RANGE_SAMPLES, MAX_RED_EYES, Mask, MaskComponent, MaskOp, MaskShape, RedEye, Spot, SpotMode,
+    BrushStroke, LandscapeClass, LocalAdjustments, MAX_COLOR_RANGE_SAMPLES, MAX_RED_EYES, Mask, MaskComponent, MaskOp, MaskShape, PersonPart, RedEye,
+    Spot, SpotMode,
 };
 use lightcraft_geom::Point;
 use serde_json::{Value, json};
@@ -34,6 +35,8 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
         "sky" => MaskShape::Sky { seg: seg_param(p), edge: 0.0 },
         "subject" => MaskShape::Subject { seg: seg_param(p), edge: 0.0 },
         "background" => MaskShape::Background { seg: seg_param(p), edge: 0.0 },
+        "people" => MaskShape::People { person: 0, parts: people_parts_param(p, c)?, seg: seg_param(p), edge: 0.0 },
+        "landscape" => MaskShape::Landscape { class: landscape_class_param(p, c)?, seg: seg_param(p), edge: 0.0 },
         "luminanceRange" => MaskShape::LuminanceRange {
             lo: f64_or(p, "lo", 0.6),
             hi: f64_or(p, "hi", 1.0),
@@ -60,10 +63,45 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
         other => {
             return Err(bad(
                 c,
-                format!("unknown mask kind `{other}` (brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt)"),
+                format!(
+                    "unknown mask kind `{other}` (brush|linear|radial|sky|subject|background|people|landscape|luminanceRange|colorRange|object|prompt)"
+                ),
             ));
         }
     })
+}
+
+/// The `parts` of a People mask (ids or names of [`PersonPart`], or one string), stored as ids;
+/// none means the whole person. A part this build doesn't know is an error that lists them.
+fn people_parts_param(p: &Value, c: &str) -> Result<Vec<String>> {
+    let given: Vec<&str> = match p.get("parts") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(a)) => a.iter().map(|v| v.as_str().ok_or_else(|| bad(c, "`parts` must be a list of part ids"))).collect::<Result<_>>()?,
+        Some(_) => return Err(bad(c, "`parts` must be a list of part ids")),
+    };
+    let mut parts: Vec<PersonPart> = Vec::new();
+    for text in given {
+        let part = PersonPart::parse(text).ok_or_else(|| {
+            let known: Vec<&str> = PersonPart::ALL.iter().map(|x| x.id()).collect();
+            bad(c, format!("unknown people part `{text}` ({})", known.join("|")))
+        })?;
+        if !parts.contains(&part) {
+            parts.push(part);
+        }
+    }
+    if parts.is_empty() {
+        parts.push(PersonPart::EntirePerson);
+    }
+    Ok(parts.iter().map(|x| x.id().to_string()).collect())
+}
+
+/// The `class` of a Landscape mask (an id or name of [`LandscapeClass`]), stored as its id.
+fn landscape_class_param(p: &Value, c: &str) -> Result<String> {
+    let known = || LandscapeClass::ALL.iter().map(|x| x.id()).collect::<Vec<_>>().join("|");
+    let text = str_param(p, "class").ok_or_else(|| bad(c, format!("a landscape mask needs `class` ({})", known())))?;
+    let class = LandscapeClass::parse(text).ok_or_else(|| bad(c, format!("unknown landscape class `{text}` ({})", known())))?;
+    Ok(class.id().to_string())
 }
 
 /// `[[x, y], …]` normalized points under `key`.
@@ -86,8 +124,8 @@ enum Later {
     Clicks(Vec<Point>, Vec<Point>),
     /// Background mode: the Describe selection is computed first; the mask is added when found.
     Text(String),
-    /// Background mode: a one-click selection (Subject, Sky, Background) is computed first; the
-    /// mask is added when found.
+    /// Background mode: a one-click selection (Subject, Sky, Background, People, Landscape) is
+    /// computed first; the mask is added when found.
     Auto(AutoKind),
 }
 
@@ -102,8 +140,15 @@ fn resolve_ai(s: &mut Session, shape: &mut MaskShape, c: &str) -> Result<Later> 
     match shape {
         MaskShape::Object { seg: Some(_), .. } | MaskShape::Prompt { seg: Some(_), .. } => {}
         // one-click shapes: the model's result when it is installed; without it their heuristic
-        // stands in (no error, no download offer), as before the model existed
-        MaskShape::Subject { seg, .. } | MaskShape::Sky { seg, .. } | MaskShape::Background { seg, .. } if seg.is_none() => {
+        // stands in (no error, no download offer), as before the model existed (People: the
+        // subject heuristic; Landscape: the sky heuristic for Sky, nothing for the other classes)
+        MaskShape::Subject { seg, .. }
+        | MaskShape::Sky { seg, .. }
+        | MaskShape::Background { seg, .. }
+        | MaskShape::People { seg, .. }
+        | MaskShape::Landscape { seg, .. }
+            if seg.is_none() =>
+        {
             let Some(auto) = auto else { return Ok(Later::Nothing) };
             if s.segmenter.require_model().is_err() {
                 return Ok(Later::Nothing);
@@ -111,7 +156,7 @@ fn resolve_ai(s: &mut Session, shape: &mut MaskShape, c: &str) -> Result<Later> 
             if background {
                 return Ok(Later::Auto(auto));
             }
-            let found = segment(s, |s| s.segment_auto(id, auto))?;
+            let found = segment(s, |s| s.segment_auto(id, &auto))?;
             *seg = Some(found.ok_or_else(|| ai_err(auto.nothing_found()))?);
         }
         MaskShape::Object { hint, exclude, .. } if !hint.is_empty() && background => {
@@ -265,7 +310,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create New Mask",
             [],
             None,
-            "{kind: brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; object/prompt/sky/subject/background: seg? a stored segmentation, no model needed), name?} — object/prompt need the SAM 3 model; sky/subject/background use it when installed (else a heuristic); in the app those return {pending} and the mask appears when found",
+            "{kind: brush|linear|radial|sky|subject|background|people|landscape|luminanceRange|colorRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; people: parts? [entirePerson|faceSkin|bodySkin|eyebrows|eyes|lips|teeth|hair|facialHair|clothes]; landscape: class sky|water|naturalGround|artificialGround|mountains|vegetation|architecture; object/prompt/sky/subject/background/people/landscape: seg? a stored segmentation, no model needed), name?} — object/prompt need the SAM 3 model; sky/subject/background/people/landscape use it when installed (else a heuristic); in the app those return {pending} and the mask appears when found",
             has_active,
             |s, p| {
                 let kind = str_param(p, "kind").unwrap_or("radial").to_string();
@@ -278,7 +323,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     return Ok(json!({"pending": true}));
                 }
                 if let Later::Auto(kind) = &later {
-                    let (kind, id) = (*kind, s.active().ok_or_else(|| bad("mask.add", "no active photo"))?);
+                    let (kind, id) = (kind.clone(), s.active().ok_or_else(|| bad("mask.add", "no active photo"))?);
                     segment(s, |s| s.segment_auto_later(id, None, "add", name, kind))?;
                     return Ok(json!({"pending": true}));
                 }
@@ -324,7 +369,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     return Ok(json!({"pending": true}));
                 }
                 if let Later::Auto(kind) = &later {
-                    let (kind, op) = (*kind, p.get("op").and_then(Value::as_str).unwrap_or("add"));
+                    let (kind, op) = (kind.clone(), p.get("op").and_then(Value::as_str).unwrap_or("add"));
                     segment(s, |s| s.segment_auto_later(id, Some(mid), op, None, kind))?;
                     return Ok(json!({"pending": true}));
                 }
