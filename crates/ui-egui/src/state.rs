@@ -21,6 +21,8 @@ pub use view::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiState {
+    /// Pending server copies survive a normal application restart, tied to their library.
+    pub drop_transfers: Vec<crate::drop_transfer::Pending>,
     /// How large the app's window was and whether it was zoomed, to open it like that again (the
     /// desktop app; absent until a window has rested at a size). Read leniently: a window that
     /// is not one reads as none, and never costs the other settings.
@@ -387,6 +389,7 @@ impl Default for UiState {
     /// Initialize the library and import review sizes as independent app preferences.
     fn default() -> Self {
         UiState {
+            drop_transfers: vec![],
             window: None,
             docking: None,
             docking_version: crate::docking::DOCKING_VERSION,

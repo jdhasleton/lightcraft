@@ -90,6 +90,7 @@ impl LightcraftApp {
         lightroom_import::tick(self, ctx);
         recheck::tick(self);
         tasks::poll(self, ctx);
+        crate::drop_transfer::tick(self, ctx);
         // after the poll: a lookup that just finished is cleared, so photos queued meanwhile are looked up now
         crate::lens_db::tick(self);
         updates_ui::tick(self, ctx);

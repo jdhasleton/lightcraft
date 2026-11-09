@@ -23,6 +23,7 @@ pub mod destination;
 pub mod dialogs;
 pub mod docking;
 mod drop_overlay;
+pub mod drop_transfer;
 pub mod export_task;
 mod find_similar;
 mod focus_scan;
@@ -210,6 +211,7 @@ pub struct LightcraftApp {
     slideshow_auto_paused: bool,
     /// Files dropped since the last UI pass, consumed exactly once by the UI phase.
     dropped_files: Vec<egui::DroppedFileHandle>,
+    pub(crate) drop_transfer: drop_transfer::Runtime,
     /// Prefix of `dropped_files` that arrived behind a prompt, library window or its picker.
     /// Preserve only this prefix through subsequent dialogs/imports; later arrivals still take
     /// the ordinary refusal path unless they too arrive while the original barrier is up.

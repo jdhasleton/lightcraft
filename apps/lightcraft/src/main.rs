@@ -364,7 +364,8 @@ fn main() -> eframe::Result {
                 // HDR display: SDR unless the surface, platform and display all allow HDR
                 hdr_display::report(cc.wgpu_render_state.as_ref().map(|r| r.target_format));
                 let mut app = LightcraftApp::new(session, services(cc, app_log_file.as_deref()));
-                app.set_startup_update_check(true);
+                // Stock updates would replace a private build's server-copy feature.
+                app.set_startup_update_check(option_env!("LIGHTCRAFT_SERVER_BUILD").is_none());
                 if let Some(ui) = prefs {
                     app.ui = ui;
                 }

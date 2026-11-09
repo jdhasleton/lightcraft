@@ -48,6 +48,8 @@ pub struct ImportTask {
     run: Option<ImportRun>,
     /// The import's row in the activity stack (its ✕ and `activity.cancel` set the run's cancel flag).
     guard: Option<lightcraft_engine::activity::TaskGuard>,
+    server_copy: Option<crate::drop_transfer::Pending>,
+    server_ids: Vec<u64>,
 }
 
 impl ImportTask {
@@ -77,7 +79,7 @@ impl ImportTask {
 /// slow drives) inline, one batch per frame.
 enum Runner {
     #[cfg(not(target_arch = "wasm32"))]
-    Thread(std::sync::mpsc::Receiver<lightcraft_engine::import::Prepared>),
+    Thread(std::sync::mpsc::Receiver<Result<lightcraft_engine::import::Prepared, String>>),
     #[cfg(target_arch = "wasm32")]
     Inline { job: Box<lightcraft_engine::import::ImportJob>, queue: Vec<String>, files: Option<std::collections::VecDeque<String>> },
 }
@@ -91,6 +93,7 @@ struct ImportRun {
     now: String,
     album: Option<u64>,
     album_name: Option<String>,
+    error: Option<String>,
 }
 
 impl std::fmt::Debug for ImportRun {
@@ -112,13 +115,14 @@ impl ImportRun {
         queue: Vec<String>,
         album: Option<u64>,
         album_name: Option<String>,
+        server_destination: Option<String>,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (total, done) = (job.total.clone(), job.done.clone());
         let (opts, now) = (job.opts.clone(), job.now().to_string());
-        let runner = Self::spawn(job, queue, cancel.clone(), ctx)?;
-        Ok(ImportRun { runner, cancel, total, done, opts, now, album, album_name })
+        let runner = Self::spawn(job, queue, cancel.clone(), server_destination, ctx)?;
+        Ok(ImportRun { runner, cancel, total, done, opts, now, album, album_name, error: None })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -126,23 +130,50 @@ impl ImportRun {
         mut job: lightcraft_engine::import::ImportJob,
         queue: Vec<String>,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        server_destination: Option<String>,
         ctx: &egui::Context,
     ) -> Result<Runner, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         let work = move || {
+            if server_destination.is_some() && queue.iter().any(|p| !std::path::Path::new(p).exists()) {
+                let _ = tx.send(Err("A source file or folder is unavailable; restore its path or reconnect the source drive".into()));
+                ctx.request_repaint();
+                return;
+            }
+            if let Some(destination) = &server_destination
+                && let Err(e) = crate::drop_transfer::check_destination(destination)
+            {
+                let _ = tx.send(Err(e));
+                ctx.request_repaint();
+                return;
+            }
             let files = job.expand(&queue);
+            if server_destination.is_some() && files.is_empty() {
+                let _ = tx.send(Err("No source photos are available; reconnect the source drive or restore the original paths".into()));
+            }
             for chunk in files.chunks(lightcraft_engine::import::batch_size()) {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
+                if let Some(destination) = &server_destination
+                    && let Err(e) = crate::drop_transfer::check_destination(destination)
+                {
+                    let _ = tx.send(Err(e));
+                    break;
+                }
                 let prepared = match lightcraft_engine::guard::catch("import", || job.prepare_files(chunk.to_vec(), &cancel)) {
                     Ok(p) => p,
-                    Err(_) => break, // logged; the files readied so far are added
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        break;
+                    }
                 };
-                if let Err(unsent) = tx.send(prepared) {
+                if let Err(unsent) = tx.send(Ok(prepared)) {
                     // the import was dropped: nothing will add these, so take back what a Move placed
-                    unsent.0.rollback();
+                    if let Ok(prepared) = unsent.0 {
+                        prepared.rollback();
+                    }
                     break;
                 }
                 ctx.request_repaint();
@@ -157,6 +188,7 @@ impl ImportRun {
         job: lightcraft_engine::import::ImportJob,
         queue: Vec<String>,
         _cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        _server_destination: Option<String>,
         _ctx: &egui::Context,
     ) -> Result<Runner, String> {
         Ok(Runner::Inline { job: Box::new(job), queue, files: None })
@@ -170,7 +202,8 @@ impl ImportRun {
                 let mut out = Vec::new();
                 while out.len() < 4 {
                     match rx.try_recv() {
-                        Ok(p) => out.push(p),
+                        Ok(Ok(p)) => out.push(p),
+                        Ok(Err(e)) => self.error = Some(e),
                         Err(std::sync::mpsc::TryRecvError::Empty) => return Some(out),
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => return if out.is_empty() { None } else { Some(out) },
                     }
@@ -273,6 +306,18 @@ pub fn start_paths(app: &mut LightcraftApp, paths: Vec<String>) -> Result<Value,
     Ok(json!({"importing": total}))
 }
 
+pub(crate) fn start_server_copy(app: &mut LightcraftApp, pending: crate::drop_transfer::Pending) -> Result<(), String> {
+    busy_synchronizing(app)?;
+    if running(app) {
+        return Err("An import is running".into());
+    }
+    let params = json!({"mode": "copy", "destination": pending.destination, "organize": "date"});
+    let mut task = ImportTask::new(pending.paths.clone(), params, app.session.undo.len(), false);
+    task.server_copy = Some(pending);
+    app.import = Some(task);
+    Ok(())
+}
+
 /// Advance the import in progress (called every frame): start its worker, then add the batches it
 /// has readied to the catalog.
 pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
@@ -283,7 +328,10 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
         let started = lightcraft_engine::cmd::library::import_params(&app.session, &p)
             .and_then(|req| Ok((lightcraft_engine::import::ImportJob::new(&mut app.session, req.opts)?, req.album, req.album_name)))
             .map_err(|e| e.to_string())
-            .and_then(|(job, album, name)| ImportRun::start(job, std::mem::take(&mut task.queue), album, name, ctx));
+            .and_then(|(job, album, name)| {
+                let destination = task.server_copy.as_ref().map(|p| p.destination.clone());
+                ImportRun::start(job, std::mem::take(&mut task.queue), album, name, destination, ctx)
+            });
         if task.auto {
             task.keep_selection = Some(app.session.selection.clone());
         }
@@ -296,6 +344,9 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
             Err(e) => {
                 log::warn!("import: {e}");
                 app.toast(ctx, crate::i18n::tr_format!("Import failed: {e}", e = e));
+                if let Some(pending) = &task.server_copy {
+                    crate::drop_transfer::complete(app, ctx, pending, &[], Some(e));
+                }
                 return;
             }
         }
@@ -334,7 +385,22 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
         app.import = Some(task);
         return;
     }
+    let server = task.server_copy.clone();
+    let mut ids = task.server_ids.clone();
+    ids.extend(&task.existing);
+    ids.sort_unstable();
+    ids.dedup();
+    let error = if task.cancelled {
+        Some("Transfer cancelled; it remains queued for retry".into())
+    } else if task.failed > 0 {
+        Some(format!("{} files could not be transferred; retrying in one minute", task.failed))
+    } else {
+        task.run.as_ref().and_then(|r| r.error.clone())
+    };
     finish(app, ctx, task);
+    if let Some(pending) = server {
+        crate::drop_transfer::complete(app, ctx, &pending, &ids, error);
+    }
 }
 
 /// Add one readied batch to the catalog (an undo step merged into the import's at the end).
@@ -355,6 +421,10 @@ fn commit_batch(app: &mut LightcraftApp, task: &mut ImportTask, prepared: lightc
             let len = |k: &str| v[k].as_array().map_or(0, Vec::len);
             task.imported += len("imported");
             task.restored += len("restored");
+            if task.server_copy.is_some() {
+                task.server_ids
+                    .extend(["imported", "restored"].iter().flat_map(|k| v[*k].as_array().into_iter().flatten().filter_map(Value::as_u64)));
+            }
             task.duplicates += len("duplicates");
             task.existing.extend(v["duplicates"].as_array().into_iter().flatten().filter_map(|d| d["existing"].as_u64()));
             task.failed += len("failed");

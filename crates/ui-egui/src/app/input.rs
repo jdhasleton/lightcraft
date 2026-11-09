@@ -97,6 +97,15 @@ impl LightcraftApp {
             self.toast(ctx, crate::i18n::tr("Finish Lightroom catalog import before adding photos"));
             return;
         }
+        // Automatic server copies queue bursts, including drops made during another import.
+        if self.ui.settings.drop_copy_enabled {
+            if let Err(e) = crate::drop_transfer::enqueue(self, photos) {
+                self.toast(ctx, e);
+            } else {
+                self.toast(ctx, "Queued for server copy; keep the source files until the transfer finishes");
+            }
+            return;
+        }
         if import::running(self) {
             self.toast(ctx, crate::i18n::tr("An import is running"));
             return;

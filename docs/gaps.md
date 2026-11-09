@@ -90,6 +90,7 @@ Beta-blocking gaps (B) total **~230–430 h**; with the stability and platform w
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-09 | minor | Optional automatic server copies added to drag-and-drop imports; existing ranked gaps and readiness estimates remain unchanged. See [server-copy.md](server-copy.md). |
 | 2026-11-07 | correction | Compressed ORF sensor support withdrawn pending provenance review; embedded preview fallback remains. Coverage regenerated without the removed decoder: 557 verified, 665 unverified, 187 preview-only, 37 unsupported; 94% use-weighted coverage. |
 | 2026-11-04 | minor | Compressed ORF support was introduced in #3775; subsequently withdrawn pending provenance review. Earlier clean-room and verification claims are withdrawn; compressed files use embedded previews when available. See [ORF status](orf-compression.md). |
 | 2026-11-05 | minor | Gap 3: process V5 rolls a raw's tone curve off into white in stops, so raising Exposure keeps the highlights the sensor recorded (#1632); the gap stays open (no Lightroom comparison) and hours are unchanged |

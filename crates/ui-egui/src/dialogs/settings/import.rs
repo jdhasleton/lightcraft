@@ -133,6 +133,7 @@ pub(super) fn import_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens)
     if !cfg!(target_arch = "wasm32") {
         heading(ui, t, crate::i18n::tr("Dropped Files"));
         check(ui, "settings.importDropped", &mut app.ui.settings.import_dropped_directly, "Import dropped files without review");
+        server_copy_settings(app, ui, t);
         heading(ui, t, crate::i18n::tr("Cameras and Cards"));
         let mut on_card = d.show_on_card;
         if check(ui, "settings.importOnCard", &mut on_card, "Show the import review when a camera or card is connected") {
@@ -198,5 +199,59 @@ pub(super) fn import_tab(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens)
     }
     if app.session.library.is_none() {
         hint(ui, t, crate::i18n::tr("In-memory session: these settings last until LightCraft quits."));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn server_copy_settings(app: &mut LightcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    heading(ui, t, "Automatic server copy");
+    check(ui, "settings.dropCopyEnabled", &mut app.ui.settings.drop_copy_enabled, "Automatically copy dropped photos to the server");
+    hint(
+        ui,
+        t,
+        "Choose the server folder once. Drops copy there by capture date, then reference the server originals. Source files are never deleted.",
+    );
+    row(ui, t, "Server folder", |ui| {
+        let current = app.ui.settings.drop_copy_destination.clone();
+        let id = egui::Id::unique("settingsServerCopyPath");
+        let mut text: String = ui.data(|m| m.get_temp(id)).unwrap_or(current);
+        let shown = field(ui, crate::text_field::TextField::singleline("field:settings.dropCopyDestination", &mut text).width(260.0));
+        if shown.committed() {
+            app.ui.settings.drop_copy_destination = text.trim().to_string();
+        }
+        if shown.editing {
+            ui.data_mut(|m| m.insert_temp(id, text));
+        } else {
+            ui.data_mut(|m| m.remove::<String>(id));
+        }
+        let r = ui.add_enabled(app.services.pick_folder.is_some(), egui::Button::new("Choose…"));
+        register(ui, "button:settingsDropCopyFolder", r.rect);
+        if r.clicked()
+            && let Some(folder) = app.services.pick_folder.as_mut().and_then(|f| f())
+        {
+            app.ui.settings.drop_copy_destination = folder;
+        }
+    });
+    check(ui, "settings.dropCopySmartPreviews", &mut app.ui.settings.drop_copy_smart_previews, "Build local Smart Previews after copying");
+    hint(
+        ui,
+        t,
+        "Keep the library and Smart Previews on this computer. If the share is offline, copies wait and retry while this app is open. Keep source files available until copying finishes.",
+    );
+    if !app.ui.drop_transfers.is_empty() {
+        row(ui, t, "Pending copies", |ui| {
+            ui.label(format!("{} batch(es)", app.ui.drop_transfers.len()));
+            let r = ui.button("Retry now");
+            register(ui, "button:settingsDropCopyRetry", r.rect);
+            if r.clicked() {
+                app.drop_transfer.next_retry = 0.0;
+            }
+            if ui.button("Clear pending copies").clicked() {
+                app.ui.drop_transfers.clear();
+            }
+        });
+        if let Some(error) = app.ui.drop_transfers.iter().find_map(|p| p.error.as_deref()) {
+            hint(ui, t, error);
+        }
     }
 }

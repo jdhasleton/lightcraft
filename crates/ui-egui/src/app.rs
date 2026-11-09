@@ -59,6 +59,7 @@ impl LightcraftApp {
             slideshow_hidden_at: None,
             slideshow_auto_paused: false,
             dropped_files: vec![],
+            drop_transfer: Default::default(),
             deferred_dropped_file_count: 0,
             synthetic_in_flight: false,
             ui_passes: 0,

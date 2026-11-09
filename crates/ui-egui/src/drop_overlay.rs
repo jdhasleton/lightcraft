@@ -52,6 +52,9 @@ fn lines(app: &LightcraftApp, paths: Vec<String>, unknown: bool) -> Vec<String> 
     } else if !drop.photos.is_empty() && app.lightroom.is_some() && !cfg!(target_arch = "wasm32") {
         // the drop is refused while a Lightroom catalog import owns the catalog
         out.push(crate::i18n::tr("Finish Lightroom catalog import before adding photos").to_string());
+    } else if !drop.photos.is_empty() && app.ui.settings.drop_copy_enabled && !cfg!(target_arch = "wasm32") {
+        let n = drop.photos.len();
+        out.push(format!("Drop to queue {n} item{} for server copy", plural(n)));
     } else if !drop.photos.is_empty() && crate::import::running(app) && !cfg!(target_arch = "wasm32") {
         out.push(crate::i18n::tr("An import is running. Drop photos when it has finished").to_string());
     } else if !drop.photos.is_empty() {

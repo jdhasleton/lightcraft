@@ -37,6 +37,12 @@ enum Platform {
 /// platform default. The override is the complete directory; no application-name suffix is appended. An
 /// explicitly empty value disables the settings directory instead of falling back to a personal profile.
 pub fn config_dir() -> Option<PathBuf> {
+    // A private server-copy build keeps its transfer queue separate from stock LightCraft,
+    // whose older preferences writer would otherwise discard these additional fields.
+    #[cfg(target_os = "macos")]
+    if option_env!("LIGHTCRAFT_SERVER_BUILD").is_some() && std::env::var_os("LIGHTCRAFT_CONFIG_DIR").is_none() {
+        return std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support/LightCraft Server"));
+    }
     let platform = if cfg!(target_os = "macos") {
         Platform::Mac
     } else if cfg!(windows) {

@@ -247,6 +247,84 @@ fn dropping_imports_directly_when_settings_say_so() {
 }
 
 #[test]
+fn server_drop_copies_without_a_dialog_and_keeps_sources() {
+    let dir = Scratch::new("server-copy");
+    let mut h = app_with_library(&dir);
+    let destination = dir.path("server");
+    std::fs::create_dir_all(&destination).unwrap();
+    h.app.ui.settings.drop_copy_enabled = true;
+    h.app.ui.settings.drop_copy_destination = destination.clone();
+    h.app.ui.settings.drop_copy_smart_previews = false;
+    // The server setting takes precedence even when ordinary drops would open a review.
+    drop_files(&mut h, &[dir.path("trip")], false);
+    assert!(h.step_until(SETTLE, |h| photos(h) == 2 && h.app.ui.drop_transfers.is_empty() && h.app.import.is_none()));
+    assert!(h.app.ui.dialog.is_none());
+    for p in h.app.session.catalog.photos() {
+        let lightcraft_catalog::Source::File { path } = &p.source else { panic!("expected file") };
+        assert!(std::path::Path::new(path).starts_with(&destination));
+        let name = std::path::Path::new(path).file_name().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), std::fs::read(std::path::Path::new(&dir.path("trip")).join(name)).unwrap());
+    }
+    assert!(std::path::Path::new(&dir.path("trip/a.png")).exists());
+    assert!(std::path::Path::new(&dir.path("trip/b.png")).exists());
+}
+
+#[test]
+fn server_drop_waits_offline_and_resumes_after_reconnect() {
+    let dir = Scratch::new("server-offline");
+    let mut h = app_with_library(&dir);
+    let destination = dir.path("offline-server");
+    h.app.ui.settings.drop_copy_enabled = true;
+    h.app.ui.settings.drop_copy_destination = destination.clone();
+    h.app.ui.settings.drop_copy_smart_previews = false;
+    drop_files(&mut h, &[dir.path("trip")], false);
+    assert!(h.step_until(T, |h| h.app.ui.drop_transfers.first().is_some_and(|p| p.error.is_some())));
+    assert_eq!(photos(&h), 0);
+    assert!(!std::path::Path::new(&destination).exists(), "never replace an offline server with a local folder");
+    let saved = serde_json::to_vec(&h.app.ui).unwrap();
+    h.app.ui = serde_json::from_slice(&saved).unwrap();
+    h.app.drop_transfer = Default::default();
+    std::fs::create_dir_all(&destination).unwrap();
+    assert!(h.step_until(SETTLE, |h| photos(h) == 2 && h.app.ui.drop_transfers.is_empty()));
+}
+
+#[test]
+fn server_drop_never_treats_a_local_catalog_duplicate_as_a_server_copy() {
+    let dir = Scratch::new("server-local-duplicate");
+    let mut h = app_with_library(&dir);
+    h.app.ui.settings.import_dropped_directly = true;
+    drop_files(&mut h, &[dir.path("trip/a.png")], false);
+    assert!(h.step_until(SETTLE, |h| photos(h) == 1 && h.app.import.is_none()));
+    let destination = dir.path("server");
+    std::fs::create_dir_all(&destination).unwrap();
+    h.app.ui.settings.drop_copy_enabled = true;
+    h.app.ui.settings.drop_copy_destination = destination;
+    h.app.ui.settings.drop_copy_smart_previews = false;
+    drop_files(&mut h, &[dir.path("trip/a.png")], false);
+    assert!(h.step_until(T, |h| h.app.ui.drop_transfers.first().is_some_and(|p| p.error.is_some())));
+    assert_eq!(h.app.ui.drop_transfers.len(), 1, "a duplicate on the laptop is not reported as copied to the server");
+}
+
+#[test]
+fn server_drop_builds_local_smart_previews_automatically() {
+    let dir = Scratch::new("server-smart-previews");
+    let mut h = app_with_library(&dir);
+    let destination = dir.path("server");
+    std::fs::create_dir_all(&destination).unwrap();
+    h.app.ui.settings.drop_copy_enabled = true;
+    h.app.ui.settings.drop_copy_destination = destination.clone();
+    h.app.ui.settings.drop_copy_smart_previews = true;
+    drop_files(&mut h, &[dir.path("trip")], false);
+    assert!(h.step_until(SETTLE, |h| {
+        photos(h) == 2
+            && h.app.ui.drop_transfers.is_empty()
+            && h.app.session.catalog.photos().all(|p| lightcraft_engine::cmd::previews::has_smart_preview(&h.app.session, p.id))
+    }));
+    let proxy_dir = h.app.session.media.smart_dir.as_ref().unwrap();
+    assert!(!proxy_dir.starts_with(destination), "proxies stay in the local library");
+}
+
+#[test]
 fn a_drop_while_a_dialog_is_open_leaves_the_dialog_and_imports_nothing() {
     let dir = Scratch::new("dialog");
     let mut h = app(&dir);
