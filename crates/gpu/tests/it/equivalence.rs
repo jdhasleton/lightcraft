@@ -480,7 +480,7 @@ fn cases() -> Vec<(&'static str, Edit)> {
             s.masks = vec![
                 Mask {
                     components: vec![
-                        MaskComponent { name: None, op: MaskOp::Add, invert: false, shape: MaskShape::Sky },
+                        MaskComponent { name: None, op: MaskOp::Add, invert: false, shape: MaskShape::sky() },
                         MaskComponent {
                             name: None,
                             op: MaskOp::Subtract,
@@ -492,12 +492,12 @@ fn cases() -> Vec<(&'static str, Edit)> {
                     ..Default::default()
                 },
                 Mask {
-                    components: vec![MaskComponent { name: None, op: MaskOp::Intersect, invert: false, shape: MaskShape::Subject }],
+                    components: vec![MaskComponent { name: None, op: MaskOp::Intersect, invert: false, shape: MaskShape::subject() }],
                     adjust: lightcraft_develop::LocalAdjustments { exposure: 0.5, ..Default::default() },
                     ..Default::default()
                 },
                 Mask {
-                    components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: true, shape: MaskShape::Background }],
+                    components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: true, shape: MaskShape::background() }],
                     adjust: lightcraft_develop::LocalAdjustments { saturation: -60.0, ..Default::default() },
                     invert: true,
                     ..Default::default()

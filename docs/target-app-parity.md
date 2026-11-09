@@ -92,7 +92,7 @@ search embeddings; generative remove runs in Adobe's cloud.
 |---|---|---|
 | 2026-10-12 | minor | Mamiya MEF decoded (raw-parity.md): 241 verified, 35 unsupported; rounded numbers unchanged |
 | 2026-10-12 | minor | Epson ERF decoded (raw-parity.md): 240 models verified, 229 preview-only; shares and rounded numbers unchanged |
-| Subject / Sky / Background masks | classical heuristics; the file's own DNG semantic mattes | 🟡 |
+| Subject / Sky / Background masks | SAM 3 selections when the model is installed (people / animals / buildings / vehicles, else the most prominent object; `sky`; the subject's inverse); classical heuristics without it; the file's own DNG semantic mattes | 🟡 |
 | People (faces, body, hair, skin…) and Landscape masks | — | ⬜ |
 | Object / Describe masks | SAM 3 in pure Rust (Metal / CPU); opt-in 3.4 GB download, no mirror configured | 🟡 |
 | Depth range mask, Lens Blur | — | ⬜ |

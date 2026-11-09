@@ -214,6 +214,23 @@ impl Sam3 {
         Ok(Prediction { logits: p.logits, score: p.iou * sigmoid(p.object_score) })
     }
 
+    /// Segment the *whole* object at `clicks`: of the model's alternatives (a part, a larger
+    /// part, the whole), the largest that is still confident (see `Tracker::predict_whole`).
+    /// For "the subject": a click on a building's ornament selects the building.
+    pub fn segment_clicks_whole(&mut self, enc: &mut Encoded, clicks: &[Click]) -> Result<Prediction> {
+        if clicks.is_empty() {
+            return Err(Error::Model("no clicks".into()));
+        }
+        let (neck, tracker) = self.tracker_parts()?;
+        if enc.tracker.is_none() {
+            let levels = neck.forward(&enc.backbone, 3)?;
+            enc.tracker = Some(tracker.features(&levels)?);
+        }
+        let f = enc.tracker.as_ref().ok_or_else(|| Error::Model("tracker features".into()))?;
+        let p = tracker.predict_whole(f, clicks)?;
+        Ok(Prediction { logits: p.logits, score: p.iou * sigmoid(p.object_score) })
+    }
+
     fn detector_parts(&mut self) -> Result<(&detector::Detector, &tokenizer::Tokenizer)> {
         if self.detector.is_none() {
             self.detector = Some(detector::Detector::new(Self::vb(&self.weights, &self.device).pp("detector_model"))?);

@@ -42,6 +42,54 @@ pub const NOT_INSTALLED: &str = "The SAM 3 model is not installed";
 const WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 /// Most clicks one Object selection takes (the model's prompt grows with each).
 pub const MAX_CLICKS: usize = 64;
+/// What the Sky tile asks the model for.
+pub const SKY_CONCEPT: &str = "sky";
+
+/// The one-click selections the model computes (Subject, Sky, Background tiles). Background
+/// is computed as the subject and inverted when rendered, so the two always agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoKind {
+    Subject,
+    Sky,
+    Background,
+}
+
+impl AutoKind {
+    /// The one-click kind of `shape`, if it is one.
+    pub fn of(shape: &MaskShape) -> Option<AutoKind> {
+        match shape {
+            MaskShape::Subject { .. } => Some(AutoKind::Subject),
+            MaskShape::Sky { .. } => Some(AutoKind::Sky),
+            MaskShape::Background { .. } => Some(AutoKind::Background),
+            _ => None,
+        }
+    }
+
+    /// The `kind` the mask commands know it by.
+    pub fn kind(self) -> &'static str {
+        match self {
+            AutoKind::Subject => "subject",
+            AutoKind::Sky => "sky",
+            AutoKind::Background => "background",
+        }
+    }
+
+    /// What to tell the user when the model found nothing.
+    pub fn nothing_found(self) -> String {
+        match self {
+            AutoKind::Sky => "No sky was found in this photo.".into(),
+            AutoKind::Subject | AutoKind::Background => "No subject was found in this photo.".into(),
+        }
+    }
+
+    #[cfg(feature = "sam")]
+    fn job(self) -> worker::Kind {
+        match self {
+            AutoKind::Sky => worker::Kind::Text(SKY_CONCEPT.into()),
+            AutoKind::Subject | AutoKind::Background => worker::Kind::Subject,
+        }
+    }
+}
 
 /// One click of an Object selection (normalized image coordinates).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +110,8 @@ pub(crate) enum Tag {
     Clicks { photo: PhotoId, mask: u32, comp: usize, hint: Vec<Point>, exclude: Vec<Point> },
     /// A Describe selection: a new mask (`mask: None`) or a component combined by `op`.
     NewPrompt { photo: PhotoId, mask: Option<u32>, op: String, name: Option<String>, text: String },
+    /// A one-click selection (Subject, Sky, Background): a new mask or a component, as above.
+    NewAuto { photo: PhotoId, mask: Option<u32>, op: String, name: Option<String>, kind: AutoKind },
     /// A zoomed-in pass for a component, computed from `shape` (without its detail).
     Detail { photo: PhotoId, mask: u32, comp: usize, shape: MaskShape },
 }
@@ -570,6 +620,45 @@ impl Session {
         }
     }
 
+    /// The model's result for a one-click shape on photo `id`, waiting for the model: `None`
+    /// when it found nothing (no sky; for Subject and Background, nothing nameable and no
+    /// prominent point either).
+    pub fn segment_auto(&mut self, id: PhotoId, kind: AutoKind) -> Result<Option<SegMask>, String> {
+        self.segmenter.model_dir()?;
+        #[cfg(feature = "sam")]
+        {
+            self.segment_wait(id, kind.job(), None)
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (id, kind);
+            Err("AI masks are not available in this build".into())
+        }
+    }
+
+    /// Background mode: queue a one-click selection; the mask (or component, combined by `op`
+    /// into mask `mask`) is created by [`Session::segment_poll`] when something is found.
+    pub(crate) fn segment_auto_later(
+        &mut self,
+        id: PhotoId,
+        mask: Option<u32>,
+        op: &str,
+        name: Option<String>,
+        kind: AutoKind,
+    ) -> Result<(), String> {
+        self.segmenter.model_dir()?;
+        #[cfg(feature = "sam")]
+        {
+            let tag = Tag::NewAuto { photo: id, mask, op: op.to_string(), name, kind };
+            self.segment_queue(id, kind.job(), tag, None)
+        }
+        #[cfg(not(feature = "sam"))]
+        {
+            let _ = (id, mask, op, name, kind);
+            Err("AI masks are not available in this build".into())
+        }
+    }
+
     /// Start a zoomed-in pass for component `comp` of mask `mask` on photo `id` (an Object or
     /// Describe selection): the photo around the selection is rendered at a higher resolution
     /// and segmented again. In background mode [`Session::segment_poll`] applies the result;
@@ -706,6 +795,36 @@ impl Session {
                     Err(e) => polled.messages.push(e.to_string()),
                 }
             }
+            Tag::NewAuto { photo, mask, op, name, kind } => {
+                let seg = match o.result {
+                    Ok(Some(seg)) => seg,
+                    Ok(None) => return polled.messages.push(kind.nothing_found()),
+                    Err(e) => return polled.messages.push(e),
+                };
+                if self.active() != Some(photo) {
+                    return polled.messages.push("The photo changed before the selection was found; try again.".into());
+                }
+                let Ok(seg) = serde_json::to_value(seg) else { return };
+                let mut p = serde_json::json!({"kind": kind.kind(), "seg": seg});
+                if let Some(n) = name {
+                    p["name"] = serde_json::json!(n);
+                }
+                let r = match mask {
+                    None => self.execute("mask.add", &p),
+                    Some(m) => {
+                        if !self.develop_of(photo).is_some_and(|d| d.masks.iter().any(|x| x.id == m)) {
+                            return polled.messages.push("The mask was removed before the selection was found.".into());
+                        }
+                        self.active_mask = Some(m);
+                        p["op"] = serde_json::json!(op);
+                        self.execute("mask.addComponent", &p)
+                    }
+                };
+                match r {
+                    Ok(_) => polled.changed = true,
+                    Err(e) => polled.messages.push(e.to_string()),
+                }
+            }
             Tag::Detail { photo, mask, comp, shape } => {
                 let patch = match o.result {
                     Ok(Some(p)) => p,
@@ -745,6 +864,44 @@ mod tests {
         let polled = s.segment_poll();
         assert_eq!(polled.messages, vec![worker::GPU_FAILED.to_string()]);
         assert!(s.segment_poll().messages.is_empty(), "once");
+    }
+
+    /// A finished one-click selection becomes a mask of its own kind (not a Describe mask), the
+    /// subject's segmentation serves Background as it is (the pipeline inverts it), nothing found
+    /// is a message and no mask, and a component joins the mask it was asked for with its op.
+    #[cfg(feature = "sam")]
+    #[test]
+    fn a_finished_one_click_selection_becomes_a_mask_of_its_kind() {
+        let mut s = Session::with_demo();
+        s.segmenter.background = true;
+        let id = s.active().unwrap();
+        let seg = seg_box(16, 0, 0, 8, 16);
+        let outcome = |kind: AutoKind, mask: Option<u32>, op: &str, result: Result<Option<SegMask>, String>| worker::Outcome {
+            tag: Tag::NewAuto { photo: id, mask, op: op.into(), name: None, kind },
+            result,
+            superseded: false,
+            notice: None,
+        };
+        s.segmenter.results.0.send(outcome(AutoKind::Sky, None, "add", Ok(Some(seg.clone())))).unwrap();
+        let polled = s.segment_poll();
+        assert!(polled.changed && polled.messages.is_empty(), "{:?}", polled.messages);
+        let d = s.develop_of(id).unwrap();
+        assert_eq!(d.masks.len(), 1);
+        assert!(matches!(&d.masks[0].components[0].shape, MaskShape::Sky { seg: Some(x), .. } if *x == seg));
+        s.segmenter.results.0.send(outcome(AutoKind::Background, None, "add", Ok(Some(seg.clone())))).unwrap();
+        s.segment_poll();
+        let d = s.develop_of(id).unwrap();
+        assert!(matches!(&d.masks[1].components[0].shape, MaskShape::Background { seg: Some(x), .. } if *x == seg));
+        s.segmenter.results.0.send(outcome(AutoKind::Subject, None, "add", Ok(None))).unwrap();
+        let polled = s.segment_poll();
+        assert_eq!(polled.messages, vec!["No subject was found in this photo.".to_string()]);
+        assert_eq!(s.develop_of(id).unwrap().masks.len(), 2);
+        s.segmenter.results.0.send(outcome(AutoKind::Sky, Some(1), "subtract", Ok(Some(seg.clone())))).unwrap();
+        s.segment_poll();
+        let d = s.develop_of(id).unwrap();
+        assert_eq!(d.masks[0].components.len(), 2);
+        assert_eq!(d.masks[0].components[1].op, lightcraft_develop::MaskOp::Subtract);
+        assert!(matches!(&d.masks[0].components[1].shape, MaskShape::Sky { seg: Some(_), .. }));
     }
 
     fn seg_box(side: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> SegMask {

@@ -16,6 +16,8 @@ pub const ENV: &str = "LIGHTCRAFT_SAM3_REMOTE";
 pub enum Operation {
     Prepare,
     Clicks(Vec<[f32; 3]>),
+    /// The whole object at the clicks ([`Sam3::segment_clicks_whole`]; the Subject fallback).
+    ClicksWhole(Vec<[f32; 3]>),
     Text(String),
 }
 
@@ -134,6 +136,10 @@ fn predict(model: &mut Sam3, enc: &mut Encoded, operation: Operation) -> Result<
         Operation::Clicks(points) => {
             let clicks: Vec<_> = points.into_iter().map(|p| Click { x: p[0], y: p[1], positive: p[2] == 1.0 }).collect();
             Ok(Some(model.segment_clicks(enc, &clicks).map_err(|e| e.to_string())?.logits))
+        }
+        Operation::ClicksWhole(points) => {
+            let clicks: Vec<_> = points.into_iter().map(|p| Click { x: p[0], y: p[1], positive: p[2] == 1.0 }).collect();
+            Ok(Some(model.segment_clicks_whole(enc, &clicks).map_err(|e| e.to_string())?.logits))
         }
     }
 }

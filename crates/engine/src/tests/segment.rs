@@ -42,6 +42,26 @@ fn settle(s: &mut Session, limit: Duration) -> Vec<String> {
     }
 }
 
+/// Sky, Subject and Background without the model: their heuristic mask at once, no error and
+/// nothing pending (so no download offer); a stored result is kept as it is.
+#[test]
+fn one_click_masks_without_the_model_keep_their_heuristic() {
+    let mut s = Session::with_demo();
+    let id = s.active().unwrap();
+    for kind in ["sky", "subject", "background"] {
+        let r = s.execute("mask.add", &json!({"kind": kind})).unwrap();
+        assert!(r.get("pending").is_none(), "{kind}: {r}");
+    }
+    let d = s.develop_of(id).unwrap();
+    assert_eq!(d.masks.len(), 3);
+    assert!(d.masks.iter().all(|m| m.components[0].shape.one_click_seg().is_none()));
+    assert!(!s.segmenter.busy());
+    let seg = lightcraft_develop::SegMask::from_logits(4, &[5.0; 16]);
+    s.execute("mask.add", &json!({"kind": "background", "seg": serde_json::to_value(&seg).unwrap()})).unwrap();
+    let d = s.develop_of(id).unwrap();
+    assert_eq!(d.masks[3].components[0].shape.one_click_seg(), Some(&seg));
+}
+
 #[test]
 fn status_and_model_commands_without_the_model() {
     let mut s = Session::with_demo();

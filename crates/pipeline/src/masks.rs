@@ -102,8 +102,8 @@ impl Mattes {
             if p.is_empty() { self.of(&[Skin, Hair, Teeth, Glasses]) } else { p }
         };
         match shape {
-            MaskShape::Sky => self.of(&[Sky]),
-            MaskShape::Subject => person(),
+            MaskShape::Sky { .. } => self.of(&[Sky]),
+            MaskShape::Subject { .. } => person(),
             MaskShape::People { parts, .. } => {
                 let wanted: Vec<MatteKind> = parts
                     .iter()
@@ -265,8 +265,17 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
                 *v = 1.0 - smooth(tol * 0.5, tol, d);
             }
         }
-        MaskShape::Sky => {
-            // Classical sky heuristic until the segmenter lands (M12): bright, smooth, blue-ish or
+        // one-click shapes with the model's result: Subject and Sky sample it; Background is the
+        // subject's segmentation inverted, so the two always agree (no overlap, no gap)
+        MaskShape::Sky { seg: Some(seg), edge } | MaskShape::Subject { seg: Some(seg), edge } => {
+            ai_alpha(Some(seg), &[], *edge, frame, (w, h), log_l, &mut out);
+        }
+        MaskShape::Background { seg: Some(seg), edge } => {
+            ai_alpha(Some(seg), &[], *edge, frame, (w, h), log_l, &mut out);
+            out.data.iter_mut().for_each(|v| *v = 1.0 - *v);
+        }
+        MaskShape::Sky { .. } => {
+            // Classical sky heuristic, without the SAM 3 model's result: bright, smooth, blue-ish or
             // unsaturated, and connected to the top of the frame.
             let m = frame.out_to_mask(w, h);
             for (i, v) in out.data.iter_mut().enumerate() {
@@ -281,20 +290,13 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
             smooth_plane(&mut out, 0.01 * frame_px(frame, w));
         }
         MaskShape::Object { seg, detail, edge, .. } | MaskShape::Prompt { seg, detail, edge, .. } if seg.is_some() || !detail.is_empty() => {
-            // Edge: below 0 a steeper transition (up to 8× the logits), above 0 feathered (up to
-            // 2 % of the long edge, so previews and exports match)
-            let e = (*edge / 100.0).clamp(-1.0, 1.0) as f32;
-            let gain = if e < 0.0 { 1.0 - 7.0 * e } else { 1.0 };
-            sample_seg(seg.as_ref(), detail, gain, frame, w, h, log_l, &mut out);
-            if e > 0.0 {
-                smooth_plane(&mut out, e * 0.02 * frame_px(frame, w));
-            }
+            ai_alpha(seg.as_ref(), detail, *edge, frame, (w, h), log_l, &mut out);
         }
         // not computed yet (no clicks, or a build without the model): nothing selected
         MaskShape::Object { hint, .. } if hint.is_empty() => {}
         MaskShape::Prompt { .. } => {}
-        MaskShape::Subject | MaskShape::Object { .. } | MaskShape::People { .. } => {
-            // Saliency heuristic: centre-weighted local contrast (replaced by the segmenter in M12).
+        MaskShape::Subject { .. } | MaskShape::Object { .. } | MaskShape::People { .. } => {
+            // Saliency heuristic: centre-weighted local contrast (without the SAM 3 model's result).
             let m = frame.out_to_mask(w, h);
             let blur = lightcraft_raster::blur::gaussian(log_l, 0.03 * frame_px(frame, w));
             for (i, v) in out.data.iter_mut().enumerate() {
@@ -306,8 +308,8 @@ pub fn shape_alpha(shape: &MaskShape, frame: &Frame, w: usize, h: usize, img: &R
             }
             smooth_plane(&mut out, 0.015 * frame_px(frame, w));
         }
-        MaskShape::Background => {
-            let mut s = shape_alpha(&MaskShape::Subject, frame, w, h, img, log_l, ev, mattes);
+        MaskShape::Background { .. } => {
+            let mut s = shape_alpha(&MaskShape::subject(), frame, w, h, img, log_l, ev, mattes);
             s.data.iter_mut().for_each(|v| *v = 1.0 - *v);
             out = s;
         }
@@ -379,6 +381,18 @@ const SEG_EPS: f32 = 0.01;
 /// window is all inside or all outside (|mean logit| ≥ 7, times `gain`) keep their sample exactly,
 /// as do those where the photo has no edge to follow. Refine Edges
 /// then works on the combined mask ([`evaluate_one`]) and finds these edges already in place.
+/// A stored AI segmentation (and its zoomed-in detail patches) as alpha, with its Edge setting:
+/// below 0 a steeper transition (up to 8× the logits), above 0 feathered (up to 2 % of the long
+/// edge, so previews and exports match).
+fn ai_alpha(seg: Option<&SegMask>, detail: &[SegMask], edge: f64, frame: &Frame, (w, h): (usize, usize), log_l: &Plane, out: &mut Plane) {
+    let e = (edge / 100.0).clamp(-1.0, 1.0) as f32;
+    let gain = if e < 0.0 { 1.0 - 7.0 * e } else { 1.0 };
+    sample_seg(seg, detail, gain, frame, w, h, log_l, out);
+    if e > 0.0 {
+        smooth_plane(out, e * 0.02 * frame_px(frame, w));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sample_seg(seg: Option<&SegMask>, detail: &[SegMask], gain: f32, frame: &Frame, w: usize, h: usize, log_l: &Plane, out: &mut Plane) {
     let coarse = seg.and_then(SegGrid::new);

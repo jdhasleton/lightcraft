@@ -1038,10 +1038,29 @@ pub enum MaskShape {
         hi: f64,
         feather: f64,
     },
-    /// AI / automatic selections, evaluated by a segmenter.
-    Subject,
-    Sky,
-    Background,
+    /// One-click selections. With the SAM 3 model, `seg` holds the segmentation it computed
+    /// (Subject: the people or animals, else the most prominent object; Sky: the sky;
+    /// Background: the *subject's* segmentation, inverted when rendered, so the two always
+    /// agree). Without the model, or before it answers, a classical heuristic stands in.
+    Subject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        /// Edge −100..100, as for `Object` (only with `seg`).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
+    },
+    Sky {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
+    },
+    Background {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seg: Option<crate::SegMask>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        edge: f64,
+    },
     /// One object picked by clicks (SAM 3 point prompts): `hint` holds the clicks that include,
     /// `exclude` the ones that exclude; `seg` the segmentation computed from them.
     Object {
@@ -1077,6 +1096,31 @@ pub enum MaskShape {
     Landscape {
         class: String,
     },
+}
+
+impl MaskShape {
+    /// A Subject selection without an AI result yet (the heuristic, until the model answers).
+    pub const fn subject() -> MaskShape {
+        MaskShape::Subject { seg: None, edge: 0.0 }
+    }
+
+    /// A Sky selection without an AI result yet.
+    pub const fn sky() -> MaskShape {
+        MaskShape::Sky { seg: None, edge: 0.0 }
+    }
+
+    /// A Background selection without an AI result yet.
+    pub const fn background() -> MaskShape {
+        MaskShape::Background { seg: None, edge: 0.0 }
+    }
+
+    /// The stored AI segmentation of a one-click shape (Subject, Sky, Background), if any.
+    pub fn one_click_seg(&self) -> Option<&crate::SegMask> {
+        match self {
+            MaskShape::Subject { seg, .. } | MaskShape::Sky { seg, .. } | MaskShape::Background { seg, .. } => seg.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

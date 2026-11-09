@@ -225,6 +225,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Subject, Sky and Background gained room for the model's result: a library saved before that
+    /// reads unchanged, one saved without a result writes the same bytes as before, and a result
+    /// travels with the shape.
+    #[test]
+    fn one_click_shapes_read_and_write_as_before() {
+        for (kind, shape) in [("sky", MaskShape::sky()), ("subject", MaskShape::subject()), ("background", MaskShape::background())] {
+            let old = format!("{{\"kind\":\"{kind}\"}}");
+            let read: MaskShape = serde_json::from_str(&old).unwrap();
+            assert_eq!(read, shape);
+            assert_eq!(serde_json::to_string(&shape).unwrap(), old);
+            assert!(shape.one_click_seg().is_none());
+        }
+        let seg = SegMask::from_logits(2, &[4.0, -4.0, 4.0, -4.0]);
+        let with = MaskShape::Background { seg: Some(seg.clone()), edge: 25.0 };
+        let back: MaskShape = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back, with);
+        assert_eq!(back.one_click_seg(), Some(&seg));
+    }
+
     /// Remove Hot Pixels (#1345) is on for a newly imported raw and off for everything else, and an edit saved
     /// before the box existed reads as off, so it renders as it did.
     #[test]

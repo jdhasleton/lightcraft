@@ -42,6 +42,10 @@ pub enum Kind {
     Prepare,
     Clicks(Vec<lightcraft_segment::Click>),
     Text(String),
+    /// The subject (Subject and Background tiles): the people or animals the model finds
+    /// ([`SUBJECT_CONCEPTS`], in order); when it finds none, the most prominent object, by a
+    /// click where the photo's centre-weighted contrast peaks ([`salient_point`]).
+    Subject,
     /// A zoomed-in pass over `region` (normalized) of the photo, rendered by the job's `render`.
     Detail {
         prompt: Prompt,
@@ -256,6 +260,8 @@ impl Worker {
 struct State {
     model: Option<(PathBuf, Sam3)>,
     cache: Option<(u64, Encoded)>,
+    /// Where the encoded photo's contrast peaks (the Subject fallback click), by photo key.
+    salient: Option<(u64, (f32, f32))>,
     remote: Option<remote::Client>,
 }
 
@@ -395,6 +401,7 @@ fn encoded<'a>(state: &'a mut State, shared: &Shared, job: &mut Job, placement: 
     if state.cache.as_ref().is_none_or(|(k, _)| *k != job.key) {
         state.cache = None;
         let input = render(job)?;
+        state.salient = salient_point(&input.rgb, input.w, input.h).map(|at| (job.key, at));
         let _busy = Flag::raise(&shared.encoding);
         let m = state.model.as_mut().map(|(_, m)| m).ok_or("the model did not load")?;
         let t = web_time::Instant::now();
@@ -416,9 +423,13 @@ fn remote_job(state: &mut State, shared: &Shared, job: &mut Job, endpoint: &str)
         state.remote = Some(remote::Client::connect(endpoint)?);
     }
     let client = state.remote.as_mut().ok_or("remote SAM unavailable")?;
+    if matches!(job.kind, Kind::Subject) {
+        return remote_subject(client, job);
+    }
     let mut region = None;
     let operation = match std::mem::replace(&mut job.kind, Kind::Prepare) {
         Kind::Prepare => Operation::Prepare,
+        Kind::Subject => return Err("the subject is selected by remote_subject".into()),
         Kind::Text(text) => Operation::Text(text),
         Kind::Clicks(clicks) => Operation::Clicks(clicks.iter().map(|c| [c.x, c.y, if c.positive { 1.0 } else { 0.0 }]).collect()),
         Kind::Detail { prompt, region: r } => {
@@ -480,6 +491,22 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placeme
             let (m, enc) = encoded(state, shared, job, placement)?;
             Ok(text_logits(m, enc, &text)?.map(|l| SegMask::from_logits(side, &l)))
         }
+        Kind::Subject => {
+            {
+                let (m, enc) = encoded(state, shared, job, placement)?;
+                for concept in SUBJECT_CONCEPTS {
+                    if let Some(l) = text_logits(m, enc, concept)?.filter(|l| covers_enough(l)) {
+                        return Ok(Some(SegMask::from_logits(side, &l)));
+                    }
+                }
+            }
+            // nothing nameable: the whole of the most prominent thing, by a click (encoding set
+            // the point)
+            let Some((x, y)) = state.salient.filter(|(k, _)| *k == job.key).map(|(_, at)| at) else { return Ok(None) };
+            let (m, enc) = encoded(state, shared, job, placement)?;
+            let p = m.segment_clicks_whole(enc, &[lightcraft_segment::Click { x, y, positive: true }])?;
+            Ok(Some(SegMask::from_logits(side, &p.logits)))
+        }
         #[cfg(test)]
         #[allow(clippy::panic)]
         Kind::Panic => panic!("a test panic"),
@@ -520,9 +547,160 @@ fn run_job(state: &mut State, shared: &Shared, job: &mut Job, placement: Placeme
     }
 }
 
+/// What the Subject strategy asks the model for, in order; the first concept it finds (covering
+/// [`MIN_SUBJECT_FRACTION`]) is the subject, every instance of it. Most photographs' subjects
+/// are people, then pets and wildlife, then buildings and vehicles; anything else falls back to
+/// the most prominent object. Each concept costs about half a second on an Apple M4.
+pub const SUBJECT_CONCEPTS: &[&str] = &["person", "animal", "building", "vehicle"];
+
+/// The least of the frame a concept's instances must cover, together, to be the subject: a
+/// statue on a building or a distant figure in a landscape matches "person" but is not what
+/// the photo is of (a half-length portrait covers 20–40 %, a couple full-length 5–10 %).
+pub const MIN_SUBJECT_FRACTION: f32 = 0.015;
+
+/// Whether a concept's mask (logits over the model's grid) covers [`MIN_SUBJECT_FRACTION`].
+fn covers_enough(logits: &[f32]) -> bool {
+    let inside = logits.iter().filter(|v| **v > 0.0).count();
+    inside as f32 >= MIN_SUBJECT_FRACTION * logits.len().max(1) as f32
+}
+
+/// [`Kind::Subject`] on a remote worker: the concepts in turn, then a click at the most
+/// prominent point. The photo is sent once; the worker keeps it for the following requests.
+fn remote_subject(client: &mut remote::Client, job: &mut Job) -> Result<Option<SegMask>, String> {
+    let key = job.key;
+    let input = render(job)?;
+    let salient = salient_point(&input.rgb, input.w, input.h);
+    let mut send = |operation: Operation| -> Result<Option<Vec<f32>>, String> {
+        let fresh = client.key != Some(key);
+        let (rgb, w, h): (&[u8], usize, usize) = if fresh { (&input.rgb, input.w, input.h) } else { (&[], 0, 0) };
+        let logits = client.request(&Request { width: w, height: h, temporary: false, operation }, rgb)?;
+        client.key = Some(key);
+        Ok(logits)
+    };
+    let side = lightcraft_segment::MASK_SIDE;
+    for concept in SUBJECT_CONCEPTS {
+        if let Some(l) = send(Operation::Text((*concept).to_string()))?.filter(|l| covers_enough(l)) {
+            return Ok(Some(SegMask::from_logits(side, &l)));
+        }
+    }
+    let Some((x, y)) = salient else { return Ok(None) };
+    Ok(send(Operation::ClicksWhole(vec![[x, y, 1.0]]))?.map(|l| SegMask::from_logits(side, &l)))
+}
+
+/// Where the photo's centre-weighted local contrast peaks (normalized coordinates): the click
+/// that stands in for "the subject" when the model finds nothing nameable. The same measure as
+/// the pipeline's Subject heuristic (`lightcraft_pipeline::masks`), on a coarse grid, so the
+/// click lands where that heuristic's mask is strongest. `None` for an empty or short buffer.
+pub(crate) fn salient_point(rgb: &[u8], w: usize, h: usize) -> Option<(f32, f32)> {
+    let score = salient_score(rgb, w, h)?;
+    let best = score.iter().enumerate().fold(None, |best: Option<(usize, f32)>, (i, &v)| match best {
+        Some((_, b)) if b >= v => best,
+        _ if v.is_finite() => Some((i, v)),
+        _ => best,
+    })?;
+    Some((((best.0 % SALIENT_GRID) as f32 + 0.5) / SALIENT_GRID as f32, ((best.0 / SALIENT_GRID) as f32 + 0.5) / SALIENT_GRID as f32))
+}
+
+/// Cells per side of [`salient_score`]'s grid.
+const SALIENT_GRID: usize = 48;
+
+/// The saliency score of each cell of a [`SALIENT_GRID`]² grid over the photo (row-major).
+fn salient_score(rgb: &[u8], w: usize, h: usize) -> Option<Vec<f32>> {
+    const N: usize = SALIENT_GRID;
+    if w == 0 || h == 0 || rgb.len() < w.checked_mul(h)?.checked_mul(3)? {
+        return None;
+    }
+    let smooth = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    // log luminance on an N×N grid (box averages of whole pixels)
+    let mut lum = vec![0f32; N * N];
+    for (i, cell) in lum.iter_mut().enumerate() {
+        let (gx, gy) = (i % N, i / N);
+        let (x0, y0) = (gx * w / N, gy * h / N);
+        let (x1, y1) = (((gx + 1) * w / N).max(x0 + 1).min(w), ((gy + 1) * h / N).max(y0 + 1).min(h));
+        let (mut sum, mut n) = (0f32, 0f32);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let at = (y * w + x) * 3;
+                if let Some(&[r, g, b]) = rgb.get(at..at + 3) {
+                    sum += (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.0;
+                    n += 1.0;
+                }
+            }
+        }
+        *cell = (sum / n.max(1.0) + 1e-3).log2();
+    }
+    // local contrast against a blurred copy, weighted towards the centre, then smoothed so a
+    // single noisy cell can't win
+    let blur = box_blur(&box_blur(&lum, N, 3), N, 3);
+    let score: Vec<f32> = lum
+        .iter()
+        .zip(&blur)
+        .enumerate()
+        .map(|(i, (l, b))| {
+            let (nx, ny) = (((i % N) as f32 + 0.5) / N as f32, ((i / N) as f32 + 0.5) / N as f32);
+            let d = (((nx - 0.5) / 0.35).powi(2) + ((ny - 0.55) / 0.4).powi(2)).sqrt();
+            // (the 2 % tilt breaks ties towards the centre where nothing stands out)
+            (1.0 - smooth(0.6, 1.0, d)) * (1.0 - 0.02 * d.min(1.0)) * (0.5 + 0.5 * smooth(0.05, 0.6, (l - b).abs()))
+        })
+        .collect();
+    Some(box_blur(&score, N, 2))
+}
+
+/// A box blur of radius `r` over an `n × n` grid, edges clamped.
+fn box_blur(src: &[f32], n: usize, r: usize) -> Vec<f32> {
+    let at = |v: &[f32], x: usize, y: usize| v.get(y * n + x).copied().unwrap_or(0.0);
+    let pass = |v: &[f32], horizontal: bool| -> Vec<f32> {
+        (0..n * n)
+            .map(|i| {
+                let (x, y) = (i % n, i / n);
+                let c = if horizontal { x } else { y };
+                let (lo, hi) = (c.saturating_sub(r), (c + r).min(n.saturating_sub(1)));
+                let sum: f32 = (lo..=hi).map(|k| if horizontal { at(v, k, y) } else { at(v, x, k) }).sum();
+                sum / (hi + 1 - lo) as f32
+            })
+            .collect()
+    };
+    pass(&pass(src, true), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A concept whose instances are a speck of the frame (a statue, a distant figure) is not the
+    /// subject; one that covers a few percent is.
+    #[test]
+    fn a_concept_must_cover_enough_of_the_frame_to_be_the_subject() {
+        let n = lightcraft_segment::MASK_SIDE * lightcraft_segment::MASK_SIDE;
+        let speck: Vec<f32> = (0..n).map(|i| if i < n / 200 { 5.0 } else { -5.0 }).collect();
+        assert!(!covers_enough(&speck), "0.5 % is a speck");
+        let some: Vec<f32> = (0..n).map(|i| if i < n / 40 { 5.0 } else { -5.0 }).collect();
+        assert!(covers_enough(&some), "2.5 % is a subject");
+        assert!(!covers_enough(&[]));
+    }
+
+    /// The fallback click lands on a small bright thing in a flat photo, and on the centre
+    /// weighting's peak when nothing stands out; no buffer, no point.
+    #[test]
+    fn the_salient_point_finds_what_stands_out() {
+        let (w, h) = (120usize, 80usize);
+        let mut rgb = vec![90u8; w * h * 3];
+        for y in 28..36 {
+            for x in 80..92 {
+                rgb[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&[250, 250, 250]);
+            }
+        }
+        assert_eq!(salient_score(&rgb, w, h).unwrap().len(), SALIENT_GRID * SALIENT_GRID);
+        let (x, y) = salient_point(&rgb, w, h).unwrap();
+        assert!((x - 86.0 / 120.0).abs() < 0.1 && (y - 32.0 / 80.0).abs() < 0.1, "{x} {y}");
+        let (x, y) = salient_point(&vec![90u8; w * h * 3], w, h).unwrap();
+        assert!((x - 0.5).abs() < 0.1 && (y - 0.55).abs() < 0.1, "{x} {y}");
+        assert_eq!(salient_point(&[], 0, 0), None);
+        assert_eq!(salient_point(&rgb[..100], w, h), None);
+    }
 
     fn job(tag: Tag, reply: &mpsc::Sender<Outcome>) -> Job {
         // an empty folder: loading fails with an error (no model files)

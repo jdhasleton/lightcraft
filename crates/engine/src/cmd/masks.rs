@@ -7,7 +7,7 @@ use lightcraft_geom::Point;
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, bool_or, cmd, f64_or, has_active, ok, point, str_param};
-use crate::segment::{Click, MAX_CLICKS};
+use crate::segment::{AutoKind, Click, MAX_CLICKS};
 use crate::{Result, Session};
 
 /// Caps a colour-range shape's sample list at [`MAX_COLOR_RANGE_SAMPLES`] (render cost is pixels x samples).
@@ -31,9 +31,9 @@ fn shape_from(kind: &str, p: &Value, c: &str) -> Result<MaskShape> {
             feather: f64_or(p, "feather", 50.0),
             invert: bool_or(p, "invert", false),
         },
-        "sky" => MaskShape::Sky,
-        "subject" => MaskShape::Subject,
-        "background" => MaskShape::Background,
+        "sky" => MaskShape::Sky { seg: seg_param(p), edge: 0.0 },
+        "subject" => MaskShape::Subject { seg: seg_param(p), edge: 0.0 },
+        "background" => MaskShape::Background { seg: seg_param(p), edge: 0.0 },
         "luminanceRange" => MaskShape::LuminanceRange {
             lo: f64_or(p, "lo", 0.6),
             hi: f64_or(p, "hi", 1.0),
@@ -86,6 +86,9 @@ enum Later {
     Clicks(Vec<Point>, Vec<Point>),
     /// Background mode: the Describe selection is computed first; the mask is added when found.
     Text(String),
+    /// Background mode: a one-click selection (Subject, Sky, Background) is computed first; the
+    /// mask is added when found.
+    Auto(AutoKind),
 }
 
 /// Compute the segmentation of a new AI shape (Object with clicks, Prompt) — or, in background
@@ -95,8 +98,22 @@ enum Later {
 fn resolve_ai(s: &mut Session, shape: &mut MaskShape, c: &str) -> Result<Later> {
     let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
     let background = s.segmenter.background;
+    let auto = AutoKind::of(shape);
     match shape {
         MaskShape::Object { seg: Some(_), .. } | MaskShape::Prompt { seg: Some(_), .. } => {}
+        // one-click shapes: the model's result when it is installed; without it their heuristic
+        // stands in (no error, no download offer), as before the model existed
+        MaskShape::Subject { seg, .. } | MaskShape::Sky { seg, .. } | MaskShape::Background { seg, .. } if seg.is_none() => {
+            let Some(auto) = auto else { return Ok(Later::Nothing) };
+            if s.segmenter.require_model().is_err() {
+                return Ok(Later::Nothing);
+            }
+            if background {
+                return Ok(Later::Auto(auto));
+            }
+            let found = segment(s, |s| s.segment_auto(id, auto))?;
+            *seg = Some(found.ok_or_else(|| ai_err(auto.nothing_found()))?);
+        }
         MaskShape::Object { hint, exclude, .. } if !hint.is_empty() && background => {
             s.segmenter.require_model()?;
             return Ok(Later::Clicks(std::mem::take(hint), std::mem::take(exclude)));
@@ -248,7 +265,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Create New Mask",
             [],
             None,
-            "{kind: brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; object/prompt: seg? a stored segmentation, no model needed), name?} — AI kinds need the SAM 3 model; in the app a prompt returns {pending} and the mask appears when found",
+            "{kind: brush|linear|radial|sky|subject|background|luminanceRange|colorRange|object|prompt, ...shape params (start/end, center/rx/ry/angle/feather, lo/hi…; object: points/exclude [[x,y],…]; prompt: text; object/prompt/sky/subject/background: seg? a stored segmentation, no model needed), name?} — object/prompt need the SAM 3 model; sky/subject/background use it when installed (else a heuristic); in the app those return {pending} and the mask appears when found",
             has_active,
             |s, p| {
                 let kind = str_param(p, "kind").unwrap_or("radial").to_string();
@@ -258,6 +275,11 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Later::Text(text) = &later {
                     let id = s.active().ok_or_else(|| bad("mask.add", "no active photo"))?;
                     segment(s, |s| s.segment_text_later(id, None, "add", name, text))?;
+                    return Ok(json!({"pending": true}));
+                }
+                if let Later::Auto(kind) = &later {
+                    let (kind, id) = (*kind, s.active().ok_or_else(|| bad("mask.add", "no active photo"))?);
+                    segment(s, |s| s.segment_auto_later(id, None, "add", name, kind))?;
                     return Ok(json!({"pending": true}));
                 }
                 let next = s.active().and_then(|id| s.develop_of(id)).map(|d| d.next_mask_id()).unwrap_or(1);
@@ -299,6 +321,11 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Later::Text(text) = &later {
                     let op = p.get("op").and_then(Value::as_str).unwrap_or("add");
                     segment(s, |s| s.segment_text_later(id, Some(mid), op, None, text))?;
+                    return Ok(json!({"pending": true}));
+                }
+                if let Later::Auto(kind) = &later {
+                    let (kind, op) = (*kind, p.get("op").and_then(Value::as_str).unwrap_or("add"));
+                    segment(s, |s| s.segment_auto_later(id, Some(mid), op, None, kind))?;
                     return Ok(json!({"pending": true}));
                 }
                 let mut comp = 0;

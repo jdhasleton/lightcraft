@@ -211,6 +211,42 @@ impl Tracker {
     /// Predict masks for `clicks`. `multimask`: the three alternatives (best by predicted IoU is
     /// returned), else the single-mask output with SAM 2's stability fallback.
     pub fn predict(&self, f: &Features, clicks: &[Click], multimask: bool) -> Result<Prediction> {
+        let d = self.decode(f, clicks)?;
+        let best_multi = d.best_multi();
+        if multimask {
+            return d.pick(best_multi);
+        }
+        // single-mask output unless it is unstable (area changes > 2 % when the threshold moves ±0.05)
+        let single = d.masks.i((0, 0))?;
+        let inter = single.gt(0.05)?.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+        let union = single.gt(-0.05)?.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+        let stability = if union > 0.0 { inter / union } else { 1.0 };
+        if stability >= 0.98 { d.pick(0) } else { d.pick(best_multi) }
+    }
+
+    /// Predict masks for `clicks` and return the *whole* object at them: of the three
+    /// alternatives (a part, a larger part, the whole), the largest whose predicted IoU is at
+    /// least half the best one's. A single click on a façade ornament then selects the building,
+    /// not the ornament, which is what "the subject" means.
+    pub fn predict_whole(&self, f: &Features, clicks: &[Click]) -> Result<Prediction> {
+        let d = self.decode(f, clicks)?;
+        let best = d.iou.iter().skip(1).copied().fold(0.0f32, f32::max);
+        let mut choice = (d.best_multi(), 0.0f32);
+        for i in 1..MASK_TOKENS {
+            if d.iou.get(i).copied().unwrap_or(0.0) < 0.5 * best {
+                continue;
+            }
+            let area = d.masks.i((0, i))?.gt(0.0)?.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
+            if area > choice.1 {
+                choice = (i, area);
+            }
+        }
+        d.pick(choice.0)
+    }
+
+    /// The mask decoder's raw output for `clicks`: [`MASK_TOKENS`] candidate masks, their
+    /// predicted IoUs and the object-presence score.
+    fn decode(&self, f: &Features, clicks: &[Click]) -> Result<Decoded> {
         let sparse = self.embed_clicks(clicks)?;
         let tokens = Tensor::cat(&[self.output_tokens.unsqueeze(0)?, sparse], 1)?; // [1, T, 256]
         let image = f.image.broadcast_add(&self.no_mask)?; // dense prompt: "no mask"
@@ -236,18 +272,26 @@ impl Tracker {
         let masks = hyper.matmul(&up.reshape((b, uc, uh * uw))?)?.reshape((b, MASK_TOKENS, uh, uw))?;
         let iou = to_vec(&self.iou_head.forward(&iou_token)?)?;
         let object_score = to_vec(&self.obj_head.forward(&q.i((.., 0, ..))?)?)?.first().copied().unwrap_or(0.0);
-        let pick = |i: usize| -> Result<Prediction> {
-            Ok(Prediction { logits: to_vec(&masks.i((0, i))?)?, iou: iou.get(i).copied().unwrap_or(0.0), object_score })
-        };
-        let best_multi = || (1..MASK_TOKENS).max_by(|a, b| iou.get(*a).partial_cmp(&iou.get(*b)).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(1);
-        if multimask {
-            return pick(best_multi());
-        }
-        // single-mask output unless it is unstable (area changes > 2 % when the threshold moves ±0.05)
-        let single = masks.i((0, 0))?;
-        let inter = single.gt(0.05)?.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
-        let union = single.gt(-0.05)?.to_dtype(DType::F32)?.sum_all()?.to_scalar::<f32>()?;
-        let stability = if union > 0.0 { inter / union } else { 1.0 };
-        if stability >= 0.98 { pick(0) } else { pick(best_multi()) }
+        Ok(Decoded { masks, iou, object_score })
+    }
+}
+
+/// [`Tracker::decode`]'s output: `[1, MASK_TOKENS, 288, 288]` mask logits (index 0 the
+/// single-mask output, 1.. the three alternatives), one predicted IoU per mask, and the
+/// object-presence score.
+struct Decoded {
+    masks: Tensor,
+    iou: Vec<f32>,
+    object_score: f32,
+}
+
+impl Decoded {
+    fn pick(&self, i: usize) -> Result<Prediction> {
+        Ok(Prediction { logits: to_vec(&self.masks.i((0, i))?)?, iou: self.iou.get(i).copied().unwrap_or(0.0), object_score: self.object_score })
+    }
+
+    /// The alternative (1..) with the best predicted IoU.
+    fn best_multi(&self) -> usize {
+        (1..MASK_TOKENS).max_by(|a, b| self.iou.get(*a).partial_cmp(&self.iou.get(*b)).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(1)
     }
 }

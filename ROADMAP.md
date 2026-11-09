@@ -30,7 +30,7 @@ Each audience with its own hours (Opus 5.5 agent wall-clock hours to ~95%):
 
 The gap between breadth and readiness is quality and coverage, not missing buttons: camera colour is
 estimated rather than measured, CR3 decodes on 26 verified Canon bodies (rarer CRX variants still open as previews), HE NEF opens
-as preview, as does compressed ORF when an embedded preview is available; rendering is tuned by eye, AI masks are heuristics, there is no lens database, and
+as preview, as does compressed ORF when an embedded preview is available; rendering is tuned by eye, one-click AI masks need the optional SAM 3 model (heuristics without it), there is no lens database, and
 tests run in CI on Linux x64 (every pull request and push to `main`) and FreeBSD (nightly), not on macOS or Windows. **Why alpha:** core workflows run end to end, but readiness is below
 the ~75% beta bar (it is above the ~40% alpha bar) and Lightroom's main inputs, raw files, still have gaps (Nikon HE NEF opens as preview; Canon,
 ~30% of raw users, decodes CR3 on 26 verified bodies). It passes the alpha gate: all six core workflows

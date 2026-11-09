@@ -587,21 +587,21 @@ fn sky_uses_the_sources_matte() {
     let mut mattes = Mattes::default();
     mattes.push(MatteKind::Sky, left_matte(w, h, 0.5));
     let f = frame(w, h);
-    let heuristic = shape_alpha(&MaskShape::Sky, &f, w, h, &img, &l, 0.0, None);
-    let matte = shape_alpha(&MaskShape::Sky, &f, w, h, &img, &l, 0.0, Some(&mattes));
+    let heuristic = shape_alpha(&MaskShape::sky(), &f, w, h, &img, &l, 0.0, None);
+    let matte = shape_alpha(&MaskShape::sky(), &f, w, h, &img, &l, 0.0, Some(&mattes));
     assert!(heuristic.get(150, 5) > 0.9 && heuristic.get(25, 90) < 0.1, "{} {}", heuristic.get(150, 5), heuristic.get(25, 90));
     assert!(matte.get(150, 5) < 0.01 && matte.get(25, 90) > 0.99, "{} {}", matte.get(150, 5), matte.get(25, 90));
     // mattes of other kinds leave the heuristic alone
     let mut hair = Mattes::default();
     hair.push(MatteKind::Hair, left_matte(w, h, 0.5));
-    assert_eq!(shape_alpha(&MaskShape::Sky, &f, w, h, &img, &l, 0.0, Some(&hair)), heuristic);
+    assert_eq!(shape_alpha(&MaskShape::sky(), &f, w, h, &img, &l, 0.0, Some(&hair)), heuristic);
     // rotated 90° clockwise, the source's left half is the top half; a preview and a larger
     // render agree
     let s = lightcraft_develop::DevelopSettings { orientation: Orientation::Rotate90, ..Default::default() };
     let f = Frame::new(w, h, &s, true);
     for (ow, oh) in [(100, 200), (25, 50)] {
         let small = Rgb32f::filled(ow, oh, [0.5, 0.7, 1.4]);
-        let a = shape_alpha(&MaskShape::Sky, &f, ow, oh, &small, &small.map(crate::local::log_lum), 0.0, Some(&mattes));
+        let a = shape_alpha(&MaskShape::sky(), &f, ow, oh, &small, &small.map(crate::local::log_lum), 0.0, Some(&mattes));
         let at = |x: f64, y: f64| a.get((x * ow as f64) as usize, (y * oh as f64) as usize);
         assert!(at(0.5, 0.2) > 0.99 && at(0.5, 0.8) < 0.01, "{ow}×{oh}: {} {}", at(0.5, 0.2), at(0.5, 0.8));
     }
@@ -620,14 +620,40 @@ fn people_and_subject_use_person_mattes() {
     mattes.push(MatteKind::Hair, right);
     let f = frame(w, h);
     let eval = |shape: &MaskShape| shape_alpha(shape, &f, w, h, &img, &l, 0.0, Some(&mattes));
-    let subject = eval(&MaskShape::Subject);
+    let subject = eval(&MaskShape::subject());
     assert!(subject.get(10, 50) > 0.99 && subject.get(190, 50) > 0.99 && subject.get(100, 50) < 0.01);
-    let background = eval(&MaskShape::Background);
+    let background = eval(&MaskShape::background());
     assert!(background.get(100, 50) > 0.99 && background.get(10, 50) < 0.01);
     let hair = eval(&MaskShape::People { person: 0, parts: vec!["Hair".into()] });
     assert!(hair.get(190, 50) > 0.99 && hair.get(10, 50) < 0.01);
     let lips = MaskShape::People { person: 0, parts: vec!["Lips".into()] };
     assert_eq!(eval(&lips), shape_alpha(&lips, &f, w, h, &img, &l, 0.0, None));
+}
+
+/// With the model's result stored, Subject and Sky follow it and Background is its exact
+/// inverse (the two never overlap or leave a gap); Edge softens the border; a shape without a
+/// result keeps the heuristic.
+#[test]
+fn one_click_shapes_follow_their_stored_segmentation() {
+    let (w, h) = (200, 100);
+    let img = Rgb32f::filled(w, h, [0.2; 3]);
+    let l = img.map(crate::local::log_lum);
+    let f = frame(w, h);
+    // the left half, on the model's grid
+    let side = 16;
+    let logits: Vec<f32> = (0..side * side).map(|i| if i % side < side / 2 { 8.0 } else { -8.0 }).collect();
+    let seg = SegMask::from_logits(side, &logits);
+    let eval = |shape: &MaskShape| shape_alpha(shape, &f, w, h, &img, &l, 0.0, None);
+    let subject = eval(&MaskShape::Subject { seg: Some(seg.clone()), edge: 0.0 });
+    assert!(subject.get(20, 50) > 0.99 && subject.get(180, 50) < 0.01, "{} {}", subject.get(20, 50), subject.get(180, 50));
+    assert_eq!(eval(&MaskShape::Sky { seg: Some(seg.clone()), edge: 0.0 }), subject);
+    let background = eval(&MaskShape::Background { seg: Some(seg.clone()), edge: 0.0 });
+    for (s, b) in subject.data.iter().zip(&background.data) {
+        assert!((s + b - 1.0).abs() < 1e-5, "{s} + {b}");
+    }
+    let soft = eval(&MaskShape::Subject { seg: Some(seg), edge: 100.0 });
+    assert!(soft.get(100, 50) > 0.2 && soft.get(100, 50) < 0.8 && soft.get(20, 50) > 0.99, "{} {}", soft.get(100, 50), soft.get(20, 50));
+    assert_eq!(eval(&MaskShape::subject()), eval(&MaskShape::Subject { seg: None, edge: 50.0 }), "Edge needs a result");
 }
 
 #[test]

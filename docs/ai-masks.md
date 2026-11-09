@@ -56,6 +56,33 @@ The result is stored with the mask: the model's 288 × 288 mask logits over the 
 need the model, so masks survive moving the library to a machine without it, and the web build
 renders them. Editing the photo's look later does not recompute a mask (click again to update).
 
+## One-click masks: Subject, Sky, Background
+
+With the model installed, the **Subject**, **Sky** and **Background** tiles use it too, with no
+click or text needed:
+
+- **Sky** asks the model for `sky`.
+- **Subject** asks for `person` and takes every person it finds; with none, `animal`, then
+  `building`, then `vehicle`; with none of those either, the most prominent object: a click where
+  the photo's centre-weighted contrast peaks (the same measure as the heuristic below), taking the
+  *whole* object there (the largest of the model's three alternatives that is still confident, so
+  a click on a flower's petal selects the flower), rather than guessing at it. A photo without
+  a clear subject (a landscape of mountains and forest) gets its most prominent region, which may
+  not be the one you meant: Object or Describe then say which. A concept counts only when its
+  instances together cover at least 1.5 % of the frame: a statue on a façade or a distant figure
+  matches `person` but is not what the photo is of, so those photos move on to the next concept.
+- **Background** is the exact inverse of what Subject would select (computed as the subject,
+  inverted when rendered), so the two never overlap or leave a gap.
+
+The result is stored with the mask like an Object or Describe selection: renders and exports
+never need the model, and the **Edge** slider applies. The mask appears when the model answers
+(under a second, after the photo's one-time analysis), with "Selecting…" under the tiles
+meanwhile; when the model finds nothing ("No sky was found in this photo.") no mask is made.
+Without the model the tiles work as before: a classical heuristic (bright, smooth, bluish areas
+touching the top for Sky; centre-weighted contrast for Subject), and no download offer. A photo
+that carries its own mattes (iPhone ProRAW sky and person mattes) uses them in both cases. The
+one-click masks have no zoomed-in detail pass yet.
+
 ## Remote Metal inference
 
 Native builds with `sam` can keep the editor, RAW files, library, and exports local while
@@ -198,6 +225,7 @@ Therefore:
 |---|---|---|
 | `mask.add` | `{kind: "object", points?: [[x,y],…], exclude?: [[x,y],…], seg?}` | an Object mask (empty until clicked) |
 | `mask.add` | `{kind: "prompt", text, seg?}` | a Describe mask |
+| `mask.add` | `{kind: "sky" \| "subject" \| "background", seg?}` | a one-click mask: the model's selection when it is installed (in the app `{pending: true}`, the mask appears when found), else the heuristic |
 | `mask.addComponent` | `{op: add\|subtract\|intersect, kind: "object"\|"prompt", …}` | the same as a component |
 | `mask.objectPoint` | `{x, y, exclude?: bool, id?}` | one click on the selected mask's Object selection (≤ 64 clicks) |
 | `mask.refineDetail` | `{id?, component?}` | the zoomed-in detail pass → `{started}` |
