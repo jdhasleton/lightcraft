@@ -123,13 +123,11 @@ impl Build<'_> {
         Ok(Conv { w, b, k })
     }
 
-    /// A 2 × 2 transposed convolution of stride 2, kept as one matrix: row `(co · 2 + dy) · 2 + dx` is what input
-    /// channel `ci` adds to output pixel `(2y + dy, 2x + dx)` of channel `co`.
+    /// A 2 × 2 transposed convolution of stride 2.
     fn up(&mut self, p: &str, cin: usize, cout: usize) -> Result<Up, Error> {
         let w = self.param(&format!("{p}.weight"), &[cin, cout, 2, 2])?;
         let b = self.param(&format!("{p}.bias"), &[cout])?.reshape((1, cout, 1, 1)).map_err(load)?;
-        let wt = w.permute((1, 2, 3, 0)).and_then(|t| t.reshape((cout * 4, cin))).map_err(load)?;
-        Ok(Up { wt, b, cout })
+        Ok(Up { w, b, cout })
     }
 
     fn encoder_stage(&mut self, p: &str, cin: usize, cout: usize, blocks: usize) -> Result<Vec<EncoderBlock>, Error> {
@@ -268,7 +266,9 @@ impl Conv {
 }
 
 struct Up {
-    wt: Tensor,
+    /// `[cin, cout, 2, 2]` as published. It is rearranged into a matrix on every pass, not once when built: a rearranged
+    /// copy would not follow a variable the optimizer updates, so training would run on stale weights and save others.
+    w: Tensor,
     b: Tensor,
     cout: usize,
 }
@@ -276,7 +276,9 @@ struct Up {
 impl Up {
     fn forward(&self, x: &Tensor) -> R<Tensor> {
         let (n, cin, h, w) = x.dims4()?;
-        let m = batched(&self.wt, &x.reshape((n, cin, h * w))?)?;
+        // row `(co · 2 + dy) · 2 + dx` is what input channel `ci` adds to output pixel `(2y + dy, 2x + dx)` of channel `co`
+        let wt = self.w.permute((1, 2, 3, 0))?.reshape((self.cout * 4, cin))?;
+        let m = batched(&wt, &x.reshape((n, cin, h * w))?)?;
         m.reshape((n, self.cout, 2, 2, h, w))?.permute((0, 1, 4, 2, 5, 3))?.reshape((n, self.cout, 2 * h, 2 * w))?.broadcast_add(&self.b)
     }
 }

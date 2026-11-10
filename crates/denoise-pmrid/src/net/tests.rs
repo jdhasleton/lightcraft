@@ -195,6 +195,23 @@ fn a_batch_gives_what_its_tiles_give_one_at_a_time() {
 }
 
 #[test]
+fn a_trained_network_runs_on_the_weights_it_saves() {
+    // The optimizer changes each variable in place. Every layer must follow it, or training runs on stale weights and
+    // saves others (the transposed convolutions once kept a rearranged copy made when the network was built).
+    let (net, vars) = Pmrid::trainable(&mut random_weights(9, 0.05).unwrap(), &Device::Cpu).unwrap();
+    for (i, (_, v)) in vars.iter().enumerate() {
+        v.set(&(v.as_tensor() * (1.0 + 0.5 * (i % 3) as f64)).unwrap()).unwrap();
+    }
+    let x = Tensor::from_vec(tile(32), (1, 4, 32, 32), &Device::Cpu).unwrap();
+    let mut saved = lightcraft_denoise_core::safetensors::Weights::parse(&Pmrid::weights_of(&vars).unwrap().to_bytes()).unwrap();
+    let reloaded = Pmrid::new(&mut saved, &Device::Cpu).unwrap();
+    let (a, b) = (net.forward(&x).unwrap(), reloaded.forward(&x).unwrap());
+    let scale = a.abs().unwrap().max_all().unwrap().to_scalar::<f32>().unwrap();
+    let diff = (a - b).unwrap().abs().unwrap().max_all().unwrap().to_scalar::<f32>().unwrap();
+    assert!(diff <= 1e-5 * scale.max(1.0), "trained and reloaded networks differ by {diff} (answers up to {scale})");
+}
+
+#[test]
 fn a_trainable_network_learns_and_saves_its_weights() {
     let (net, vars) = Pmrid::trainable(&mut random_weights(5, 0.05).unwrap(), &Device::Cpu).unwrap();
     assert_eq!(vars.len(), 141);
