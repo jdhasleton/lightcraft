@@ -313,6 +313,17 @@ cargo run --release -p lightcraft-engine --features denoise --example denoise-tr
   PMRID's weights. Every `--every` steps it prints the PSNR on the held-out crops at ISO 1600, 6400 and 25600 and writes an
   installable model folder (`pmrid-yours`). A step of 4 crops of 256 cells takes about 1.1 s on an M4 Max's Metal (the
   processor is four times slower).
+- **Measured** (2026-11-09, one private library: 6,522 crops of 1,125 photos at ISO 400 or below, mostly an EOS R5 Mark II;
+  batch 4, M4 Max Metal, stopped at step 2,225 of 4,000), PSNR on 228 held-out crops of other photos, noisy → cleaned:
+
+  | Step | ISO 1600 | ISO 6400 | ISO 25600 |
+  |---|---|---|---|
+  | 0 (PMRID as published) | 40.48 → 46.37 | 36.66 → 44.97 | 31.47 → 42.74 |
+  | 1,000 | → 47.15 | → 45.50 | → 43.10 |
+  | 2,000 | → **47.17** | → **45.52** | → **43.13** |
+
+  Fine-tuning gains 0.8 dB at ISO 1600, 0.55 at 6400 and 0.4 at 25600 over PMRID, most of it in the first 1,000 steps.
+  This is synthetic noise on held-out crops; the CC0 benchmark and real pairs have not been run on the fine-tuned weights.
 - **Privacy.** The crops and the weights are made from your photos. They stay in the folders you name: never commit or
   publish them. The tool's code is in the repository; no photo, crop or trained weight is.
 
