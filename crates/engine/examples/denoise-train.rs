@@ -339,7 +339,11 @@ fn train(args: &[String]) -> Res<()> {
     let anchor = (a, b);
     let device = if args.iter().any(|a| a == "--cpu") { Device::Cpu } else { gpu_device().unwrap_or(Device::Cpu) };
     let (net, vars) = Pmrid::trainable(&mut Weights::read(&init.join("model.safetensors")).map_err(err)?, &device).map_err(err)?;
-    let mut adam = Adam::new(&vars)?;
+    // The transposed convolutions (`*.upsample.*`) keep PMRID's weights unless `--train-upsample`: trained with the rest,
+    // the held-out PSNR fell below the published weights within a few hundred steps at every learning rate tried.
+    let trained: Vec<(String, Var)> =
+        vars.iter().filter(|(name, _)| args.iter().any(|a| a == "--train-upsample") || !name.contains(".upsample.")).cloned().collect();
+    let mut adam = Adam::new(&trained)?;
     println!("{n_train} training crops, {n_hold} held out, {cells} cells; {steps} steps of {batch} on {:?}", device.location());
 
     // the held-out set: each crop at three ISOs, with fixed noise
@@ -372,6 +376,8 @@ fn train(args: &[String]) -> Res<()> {
 
     let mut rng = Rng(12345);
     let (started, mut avg) = (Instant::now(), 0f64);
+    let reference = k_sigma(canon_noise(1600.0), anchor).0;
+    let mut weights = Vec::with_capacity(batch);
     for step in 1..=steps {
         let mut input = Vec::with_capacity(batch * per);
         let mut target = Vec::with_capacity(batch * per);
@@ -384,16 +390,21 @@ fn train(args: &[String]) -> Res<()> {
             let (i, t) = sample(clean, iso, gain, jitter, anchor, input_scale, &mut rng);
             input.extend(i);
             target.extend(t);
+            // The k-sigma map multiplies a crop by s: up to 16 at low ISO, well under 1 at high ISO, so an unweighted
+            // loss is ruled by the cleanest crops and trades the high ISOs away. Weighting by 1 / √s makes an error
+            // count by its size against the crop's own noise (√s at ISO 1600 keeps that weight at 1).
+            weights.push((reference / k_sigma(canon_noise(iso), anchor).0).sqrt());
         }
         let x = Tensor::from_vec(input, (batch, 4, cells, cells), &device).map_err(err)?;
         let t = Tensor::from_vec(target, (batch, 4, cells, cells), &device).map_err(err)?;
-        let loss = net.forward(&x).and_then(|y| (y - t)?.abs()?.mean_all()).map_err(err)?;
+        let w = Tensor::from_vec(std::mem::take(&mut weights), (batch, 1, 1, 1), &device).map_err(err)?;
+        let loss = net.forward(&x).and_then(|y| (y - t)?.abs()?.broadcast_mul(&w)?.mean_all()).map_err(err)?;
         let grads = loss.backward().map_err(err)?;
         // warm up for 100 steps, then a cosine down to a tenth
         let warm = (step as f64 / 100.0).min(1.0);
         let progress = step as f64 / steps as f64;
         let rate = lr * warm * (0.1 + 0.9 * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos()));
-        adam.step(&vars, &grads, rate)?;
+        adam.step(&trained, &grads, rate)?;
         let l = f64::from(loss.to_scalar::<f32>().map_err(err)?) / f64::from(input_scale);
         avg = if step == 1 { l } else { 0.98 * avg + 0.02 * l };
         if step % 25 == 0 || step <= 3 {
